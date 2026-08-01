@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Тесты и инструменты
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Среды разработки
+.idea/
+.vscode/
+.claude/
+
+# Рабочие данные приложения — у каждого свои
+desktop/mock_data.json
