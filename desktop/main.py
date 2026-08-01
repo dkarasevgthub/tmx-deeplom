@@ -2,14 +2,13 @@
 import os
 import sys
 
-from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QApplication
-
 from app import devices, theme
-from app.service_host import ABSENT, EXTERNAL, host
 from app.fonts import setup_fonts
 from app.resources import APP_ICON
+from app.service_host import ABSENT, EXTERNAL, host
 from app.window import RootWindow
+from PyQt6.QtGui import QIcon
+from PyQt6.QtWidgets import QApplication
 
 
 def _use_own_taskbar_icon():

@@ -12,10 +12,10 @@ Qt style sheets don't reliably walk a comma-separated family list, so we pick
 one concrete, existing family for body and heading and bake those names into
 the stylesheet.
 """
-import os
 import glob
+import os
 
-from PyQt6.QtGui import QFontDatabase, QFont
+from PyQt6.QtGui import QFont, QFontDatabase
 
 from . import theme
 

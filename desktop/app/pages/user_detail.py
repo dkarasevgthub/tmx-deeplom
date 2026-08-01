@@ -2,16 +2,16 @@
 from datetime import datetime, timedelta
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout, QLabel, QWidget, QGridLayout
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from .. import theme, store
-from .base import Page
-from ._ui import SplitRow
-from ..widgets.common import h1, h4, breadcrumb, button, Tag
+from .. import store, theme
 from ..widgets.blueprint import BlueprintFrame
+from ..widgets.common import Tag, button, h1, h4
+from ..widgets.dialog import confirm_dialog, form_dialog
 from ..widgets.flow import FlowRow
 from ..widgets.table import TableSection
-from ..widgets.dialog import form_dialog, confirm_dialog
+from ._ui import SplitRow
+from .base import Page
 
 ARTICLES = ["100421", "100433", "201187", "201204", "100458", "100477", "100512", "300098"]
 _ACTIVITY_BY_ROLE = {

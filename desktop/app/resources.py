@@ -13,7 +13,7 @@ def icon_png(name: str, color: str, size: int = 16):
     (the calendar button of a date field) need the SVG baked out once.
     Returns None if the file cannot be written — the style then just omits it.
     """
-    from .widgets.common import svg_pixmap     # deferred: common imports theme
+    from .widgets.common import svg_pixmap  # deferred: common imports theme
 
     stem = f"{name}-{size}-{color.lstrip('#')}"
     path = os.path.join(_GENERATED_DIR, f"{stem}.png")

@@ -1,13 +1,12 @@
 """Справочник — item catalogue."""
-from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QHBoxLayout
 
-from .. import theme, store
-from .base import Page
-from ._ui import header_row, labeled_field, search_field
+from .. import store, theme
 from ..widgets.common import breadcrumb, button
-from ..widgets.table import TableSection
 from ..widgets.dialog import form_dialog
+from ..widgets.table import TableSection
+from ._ui import header_row, labeled_field, search_field
+from .base import Page
 
 
 class CatalogPage(Page):

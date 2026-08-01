@@ -2,15 +2,15 @@
 import random
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout, QLabel, QWidget, QLineEdit
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
 
-from .. import theme, store
-from .base import Page
-from ..widgets.common import h1, h4, button, Tag
+from .. import store, theme
 from ..widgets.blueprint import BlueprintFrame
+from ..widgets.common import Tag, button, h1, h4
+from ..widgets.dialog import form_dialog
 from ..widgets.flow import FlowRow
 from ..widgets.table import TableSection
-from ..widgets.dialog import form_dialog
+from .base import Page
 
 OUR_WAREHOUSE = "Склад №2"
 OUR_RESPONSIBLE = "Кузнецов И.А."
@@ -293,7 +293,6 @@ class OrderDetailPage(Page):
     def _decline(self, order):
         def on_save(v):
             self._transition(order, "declined", {"declineReason": v["reason"].strip()})
-            return None
         form_dialog(self, "Отклонить заказ",
                     [("reason", "Причина отказа (опционально)", "text", "")],
                     on_save, submit_label="Отклонить заказ")
@@ -301,7 +300,6 @@ class OrderDetailPage(Page):
     def _cancel(self, order):
         def on_save(v):
             self._transition(order, "cancelled", {"cancelReason": v["reason"].strip()})
-            return None
         form_dialog(self, "Отменить заказ",
                     [("reason", "Причина отмены (опционально)", "text", "")],
                     on_save, submit_label="Отменить заказ")

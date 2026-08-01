@@ -4,24 +4,33 @@ Batches come from a demo supplier list plus our own outgoing orders that are in
 transit (status processing/received). List ⇄ detail and scan progress are kept
 inside the page for the session.
 """
-from PyQt6.QtCore import Qt, QDate
+from PyQt6.QtCore import QDate, Qt
 from PyQt6.QtWidgets import (
-    QHBoxLayout, QVBoxLayout, QLabel, QWidget, QLineEdit, QComboBox,
-    QTableWidget, QAbstractItemView
+    QComboBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QVBoxLayout,
+    QWidget,
 )
 
-from .. import theme, store, devices
-from .base import Page, BlockColumn
-from ._ui import (
-    labeled_field, filter_action, empty_date_edit, date_value, clear_date,
-    number_field, number_value
-)
-from ..widgets.common import h1, h4, button, icon_button, Tag
+from .. import devices, store, theme
 from ..widgets.blueprint import BlueprintFrame
-from ..widgets.flow import FlowRow
-from ..widgets.table import TableSection, fit_table_height, enable_auto_columns
+from ..widgets.common import Tag, button, h1, h4, icon_button
 from ..widgets.dialog import confirm_dialog, weight_dialog
-from .shipping import config_table, cell, _kicker_value, _within, PANEL_PAGE_SIZE
+from ..widgets.flow import FlowRow
+from ..widgets.table import TableSection
+from ._ui import (
+    clear_date,
+    date_value,
+    empty_date_edit,
+    filter_action,
+    labeled_field,
+    number_field,
+    number_value,
+)
+from .base import BlockColumn, Page
+from .shipping import PANEL_PAGE_SIZE, _kicker_value, _within
 
 _BATCH_DATA = {}   # per-session cache of the scan progress kept in the store
 
@@ -202,7 +211,7 @@ class ReceivingPage(Page):
         for v, t in [("all", "Все статусы"), ("waiting", "Ожидает"), ("progress", "В работе"), ("done", "Принят")]:
             self._status_input.addItem(t, v)
         idx = self._status_input.findData(self._status)
-        self._status_input.setCurrentIndex(idx if idx >= 0 else 0)
+        self._status_input.setCurrentIndex(max(idx, 0))
         self._status_input.currentIndexChanged.connect(self._on_status)
         self._weight_min_input = number_field(self._on_weight)
         self._weight_min_input.setText(self._weight_min)

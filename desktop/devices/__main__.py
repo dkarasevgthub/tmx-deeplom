@@ -186,7 +186,7 @@ def main() -> None:
     app.aboutToQuit.connect(_on_about_to_quit)
 
     # Graceful shutdown on Ctrl+C / SIGINT.
-    def sigint_handler(signum, frame):  # noqa: ARG001
+    def sigint_handler(signum, frame):
         print("\n⏹ Получен сигнал остановки (Ctrl+C). Завершаем работу...")
         app.quit()
 

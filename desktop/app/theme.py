@@ -92,14 +92,14 @@ DATE_BUTTON_W = 24
 
 def _calendar_image() -> str:
     """`image:` rule for the date field's calendar button, if it can be baked."""
-    from .resources import icon_png     # deferred: resources imports widgets
+    from .resources import icon_png  # deferred: resources imports widgets
     path = icon_png("calendar", NEUTRAL[600], FIELD_ICON_SIZE)
     return f"image: url({path});" if path else ""
 
 
 def _chevron_image() -> str:
     """`image:` rule for the arrow of a select, if it can be baked."""
-    from .resources import icon_png     # deferred: resources imports widgets
+    from .resources import icon_png  # deferred: resources imports widgets
     path = icon_png("chevron-down", NEUTRAL[600], FIELD_ICON_SIZE)
     return f"image: url({path});" if path else ""
 

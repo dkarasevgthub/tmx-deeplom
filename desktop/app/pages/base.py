@@ -1,10 +1,15 @@
 """Base class for content pages."""
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLayout, QSpacerItem, QSizePolicy
+    QHBoxLayout,
+    QLayout,
+    QSizePolicy,
+    QSpacerItem,
+    QVBoxLayout,
+    QWidget,
 )
 
 from .. import theme
-from ..widgets.blueprint import BlueprintFrame, MARK
+from ..widgets.blueprint import MARK, BlueprintFrame
 from ..widgets.common import icon_button
 
 

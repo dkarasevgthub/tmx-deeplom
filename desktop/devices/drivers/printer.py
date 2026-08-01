@@ -24,8 +24,7 @@ import os
 import queue
 import tempfile
 import threading
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -114,7 +113,7 @@ class PrinterDriver(DeviceDriver):
         self._by_key: dict[str, Job] = {}
         self._job_counter: int = 0
 
-        self._process_queue: "queue.Queue[Job | None]" = queue.Queue()
+        self._process_queue: queue.Queue[Job | None] = queue.Queue()
         self._stop_event = threading.Event()
         self._worker: threading.Thread | None = None
 
@@ -181,7 +180,7 @@ class PrinterDriver(DeviceDriver):
                 break
             try:
                 self._print_job(job)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.error("PrinterDriver: worker crashed on job %s", job.job_id, exc_info=True)
                 self._set_job_state(job, JOB_FAILED, "internal error")
 
@@ -245,8 +244,7 @@ class PrinterDriver(DeviceDriver):
         data = job.payload.encode(self._encoding, errors="replace")
         # Honour copies by writing the payload that many times.
         with open(path, "wb") as fh:
-            for _ in range(max(1, job.copies)):
-                fh.write(data)
+            fh.writelines(data for _ in range(max(1, job.copies)))
         logger.debug("PrinterDriver: wrote job %s -> %s", job.job_id, path)
 
     def _print_via_win32(self, job: Job) -> None:

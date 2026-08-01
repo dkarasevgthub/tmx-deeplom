@@ -21,9 +21,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import List
 
-from PyQt6.QtCore import QObject, QByteArray, pyqtSignal
+from PyQt6.QtCore import QByteArray, QObject, pyqtSignal
 from PyQt6.QtSerialPort import QSerialPort
 
 from ..protocol import STATE_ERROR, STATE_OFFLINE, STATE_ONLINE
@@ -149,7 +148,7 @@ class ScannerDriver(DeviceDriver):
         try:
             data: QByteArray = self._serial.readAll()
             self._feed_bytes(bytes(data))
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.error("ScannerDriver: error reading port", exc_info=True)
 
     def _on_error_occurred(self, error: QSerialPort.SerialPortError) -> None:
@@ -201,7 +200,7 @@ class ScannerDriver(DeviceDriver):
 
     @staticmethod
     @staticmethod
-    def _split_codes(raw_line: bytes) -> List[str]:
+    def _split_codes(raw_line: bytes) -> list[str]:
         """Split *raw_line* on GS, clean and upper-case each piece."""
         out: list[str] = []
         # используем BYTE_GS как bytes

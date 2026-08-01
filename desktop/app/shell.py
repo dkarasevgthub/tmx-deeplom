@@ -1,9 +1,9 @@
 """MainView — sidebar + routed, scrollable content area."""
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QScrollArea
+from PyQt6.QtWidgets import QHBoxLayout, QScrollArea, QWidget
 
-from . import theme, devices
+from . import devices, theme
 from .sidebar import Sidebar
 
 # which sidebar section lights up for a given page key
@@ -20,8 +20,17 @@ SECTION_OF = {
 def _build_page(key, nav, **params):
     # imported lazily to avoid circular imports at module load
     from .pages import (
-        home, orders, new_order, order_detail, shipping,
-        receiving, catalog, stock, users, user_detail, product_detail,
+        catalog,
+        home,
+        new_order,
+        order_detail,
+        orders,
+        product_detail,
+        receiving,
+        shipping,
+        stock,
+        user_detail,
+        users,
     )
     builders = {
         "home": home.HomePage,

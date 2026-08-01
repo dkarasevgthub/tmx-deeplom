@@ -3,23 +3,32 @@ Simulator GUI для ручного тестирования службы device
 Использует PyQt6 и QLocalSocket для связи через именованный канал.
 """
 
-import sys
-import json
 import datetime
-from functools import partial
+import json
+import sys
 
-from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QGroupBox, QLabel, QLineEdit, QPushButton, QTextEdit,
-    QCheckBox, QComboBox, QGridLayout, QScrollArea, QFrame
-)
+from PyQt6.QtCore import Qt
 from PyQt6.QtNetwork import QLocalSocket
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QFrame,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
 # Симулятор запускают и модулем (python -m devices.simulator), и просто
 # файлом из редактора — во втором случае пакета нет, и его нужно найти самому.
 try:
-    from . import protocol  # noqa: F401
+    from . import protocol
 except ImportError:
     import os
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

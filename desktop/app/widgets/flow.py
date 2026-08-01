@@ -2,7 +2,7 @@
 width, i.e. the Qt equivalent of CSS `flex-wrap: wrap` used by the mockup's
 filter rows. Qt ships no such layout, so this is the classic implementation.
 """
-from PyQt6.QtCore import Qt, QRect, QSize, QPoint
+from PyQt6.QtCore import QPoint, QRect, QSize, Qt
 from PyQt6.QtWidgets import QLayout, QSizePolicy, QWidget
 
 

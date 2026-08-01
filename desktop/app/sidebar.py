@@ -4,13 +4,18 @@ Stylesheets here are always scoped with an object-name selector: a rule set on
 a parent widget without a selector also applies to every child, which would
 draw the block's border under each label inside it.
 """
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
 
-from . import theme, store, devices
+from . import devices, store, theme
 from .widgets.common import svg_pixmap
 
 NAV_ITEMS = [

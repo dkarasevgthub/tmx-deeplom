@@ -12,9 +12,6 @@ import logging
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from ..protocol import (
-    JOB_DONE,
-    JOB_PRINTING,
-    JOB_QUEUED,
     STATE_OFFLINE,
     STATE_ONLINE,
 )

@@ -1,16 +1,20 @@
 """Заказы — order list with incoming/outgoing tabs and filters."""
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QHBoxLayout, QLineEdit, QComboBox
+from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLineEdit
 
-from .. import theme, store
-from .base import Page
-from ._ui import (
-    header_row, labeled_field, filter_action, empty_date_edit, date_value, clear_date
-)
-from ..widgets.common import breadcrumb, button, icon_button
+from .. import store, theme
 from ..widgets.combo import SearchableComboBox
+from ..widgets.common import breadcrumb, button, icon_button
 from ..widgets.flow import FlowRow
 from ..widgets.table import TableSection
+from ._ui import (
+    clear_date,
+    date_value,
+    empty_date_edit,
+    filter_action,
+    header_row,
+    labeled_field,
+)
+from .base import Page
 
 STATUS_OPTIONS = [
     ("all", "Все статусы"), ("created", "Создан"), ("processing", "В обработке"),

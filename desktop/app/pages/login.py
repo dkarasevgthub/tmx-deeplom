@@ -1,10 +1,15 @@
 """Login screen."""
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QCheckBox
+    QCheckBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QVBoxLayout,
+    QWidget,
 )
 
-from .. import theme, store
+from .. import store, theme
 from ..widgets.blueprint import BlueprintFrame
 from ..widgets.common import button
 

@@ -72,7 +72,7 @@ class DeviceDriver(QObject):
         self._closing = False
         try:
             self._do_open()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("%s: open failed: %s", self._logname(), exc, exc_info=True)
             self._set_state(STATE_ERROR, f"open error: {exc}")
 
@@ -86,7 +86,7 @@ class DeviceDriver(QObject):
         self._reconnect_timer.stop()
         try:
             self._do_close()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("%s: close failed: %s", self._logname(), exc, exc_info=True)
         self._opened = False
         self._set_state(STATE_OFFLINE, "closed")
@@ -114,7 +114,7 @@ class DeviceDriver(QObject):
     def _do_close(self) -> None:
         """Release the hardware. Subclasses implement this."""
         # Default: nothing to release.
-        return None
+        return
 
     # --- Protected helpers -----------------------------------------------
 

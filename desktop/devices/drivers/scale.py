@@ -28,9 +28,8 @@ look the same.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
-from PyQt6.QtCore import QObject, QTimer, QEventLoop, pyqtSignal
+from PyQt6.QtCore import QEventLoop, QObject, QTimer, pyqtSignal
 from PyQt6.QtSerialPort import QSerialPort
 
 from ..protocol import STATE_ERROR, STATE_OFFLINE, STATE_ONLINE
@@ -159,7 +158,7 @@ class ScaleDriver(DeviceDriver):
                 if not line:
                     continue
                 self._handle_line(line)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.error("ScaleDriver: error reading port", exc_info=True)
 
     def _on_error_occurred(self, error: QSerialPort.SerialPortError) -> None:
@@ -226,7 +225,7 @@ class ScaleDriver(DeviceDriver):
             written = self._serial.write(payload)
             self._serial.flush()
             return written == len(payload)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.error("ScaleDriver: failed to send %r", command, exc_info=True)
             return False
 

@@ -7,17 +7,23 @@ pressed, and picked items are pinned to the top of the table.
 """
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QHBoxLayout, QVBoxLayout, QLabel, QLineEdit, QWidget, QSpinBox, QAbstractSpinBox
+    QAbstractSpinBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
 
-from .. import theme, store
-from .base import Page
-from ._ui import labeled_field
-from ..widgets.common import h1, button, icon_button
+from .. import store, theme
 from ..widgets.blueprint import BlueprintFrame
 from ..widgets.combo import SearchableComboBox
+from ..widgets.common import button, h1, icon_button
 from ..widgets.flow import FlowRow
 from ..widgets.table import TableSection
+from ._ui import labeled_field
+from .base import Page
 
 SELECTED_BG = theme.ACCENT_RAMP[100]
 CHILD_BG = "#ebebec"        # var(--color-text) at 3% over the page background
@@ -307,7 +313,7 @@ class NewOrderPage(Page):
         self._warehouse = value
         self._wh_input.blockSignals(True)
         index = self._wh_input.findData(value)
-        self._wh_input.setCurrentIndex(index if index >= 0 else 0)
+        self._wh_input.setCurrentIndex(max(index, 0))
         self._wh_input.blockSignals(False)
         self._refresh()
 

@@ -2,15 +2,15 @@
 from datetime import datetime, timedelta
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout, QLabel, QWidget, QComboBox
+from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from .. import theme, store
-from .base import Page
-from ._ui import stat_grid
-from ..widgets.common import h1, h4, button, icon_button
+from .. import theme
 from ..widgets.blueprint import BlueprintFrame
-from ..widgets.table import TableSection
+from ..widgets.common import button, h1, h4, icon_button
 from ..widgets.dialog import form_dialog
+from ..widgets.table import TableSection
+from ._ui import stat_grid
+from .base import Page
 
 # Product master data (article, code1c, name, unit, unitWeight, qty, free, reserved)
 PRODUCTS = {p[0]: p for p in [

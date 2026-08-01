@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from .protocol import make_event
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -40,9 +39,8 @@ from .protocol import (
     CMD_UNSUBSCRIBE,
     DEVICE_STATES,
     ERR_BAD_REQUEST,
-    ERR_BUSY,
-    ERR_INTERNAL,
     ERR_INCOMPATIBLE,
+    ERR_INTERNAL,
     ERR_NO_DEVICE,
     ERR_PRINTER_OFFLINE,
     ERR_SCALE_TIMEOUT,
@@ -51,6 +49,7 @@ from .protocol import (
     PROTOCOL_VERSION,
     SUPPORTED_PROTOCOL_VERSIONS,
     make_error,
+    make_event,
     make_response,
     parse_frame,
 )
@@ -119,7 +118,7 @@ class ClientSession(QObject):
         """Read available bytes, split into complete lines, dispatch."""
         try:
             data = bytes(self._socket.readAll())
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.error("Session: error reading socket", exc_info=True)
             return
         self._buffer.extend(data)
@@ -171,7 +170,7 @@ class ClientSession(QObject):
             self._reply(
                 req_id, make_error(req_id, ERR_SCALE_TIMEOUT, "scale did not stabilise")
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("Session: handler for %r failed", cmd, exc_info=True)
             self._reply(req_id, make_error(req_id, ERR_INTERNAL, str(exc)))
 
@@ -435,4 +434,4 @@ class ClientSession(QObject):
             driver.set_state_for_test(state, reason)  # type: ignore[attr-defined]
         else:
             # Base driver exposes the protected setter; use it as a fallback.
-            driver._set_state(state, reason)  # noqa: SLF001
+            driver._set_state(state, reason)

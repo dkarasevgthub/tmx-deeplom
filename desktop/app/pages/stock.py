@@ -1,8 +1,8 @@
 """Остатки — stock balances."""
-from .base import Page
-from ._ui import header_row, search_field, stat_grid
 from ..widgets.common import breadcrumb
 from ..widgets.table import TableSection
+from ._ui import header_row, search_field, stat_grid
+from .base import Page
 
 
 class StockPage(Page):

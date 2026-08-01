@@ -2,12 +2,12 @@
 from datetime import datetime
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel
+from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from .. import theme, store
-from .base import Page
+from .. import store, theme
 from ..widgets.blueprint import BlueprintFrame
-from ..widgets.common import h1, h4, breadcrumb, svg_pixmap
+from ..widgets.common import breadcrumb, h1, h4, svg_pixmap
+from .base import Page
 
 _MONTHS = ["", "января", "февраля", "марта", "апреля", "мая", "июня",
            "июля", "августа", "сентября", "октября", "ноября", "декабря"]

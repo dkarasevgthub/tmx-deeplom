@@ -13,12 +13,12 @@ from .scanner import ScannerDriver
 
 __all__ = [
     "DeviceDriver",
-    "ScannerDriver",
+    "FakePrinter",
+    "FakeScale",
+    "FakeScanner",
+    "Job",
+    "PrinterDriver",
     "ScaleDriver",
     "ScaleTimeoutError",
-    "PrinterDriver",
-    "Job",
-    "FakeScanner",
-    "FakeScale",
-    "FakePrinter",
+    "ScannerDriver",
 ]

@@ -1,8 +1,8 @@
 """Small shared UI helpers: headings, tags, buttons and line icons."""
-from PyQt6.QtCore import Qt, QByteArray, QRectF, QSize, QPointF
-from PyQt6.QtGui import QPixmap, QIcon, QColor, QPainter
+from PyQt6.QtCore import QByteArray, QPointF, QRectF, Qt
+from PyQt6.QtGui import QIcon, QPainter, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
-from PyQt6.QtWidgets import QLabel, QPushButton, QFrame, QSizePolicy
+from PyQt6.QtWidgets import QFrame, QLabel, QPushButton, QSizePolicy
 
 from .. import theme
 

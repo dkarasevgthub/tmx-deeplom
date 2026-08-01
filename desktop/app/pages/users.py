@@ -1,18 +1,25 @@
 """Пользователи — user list, add dialog, and the roles/permissions matrix."""
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QHBoxLayout, QVBoxLayout, QLineEdit, QComboBox, QLabel, QWidget, QCheckBox, QGridLayout
+    QCheckBox,
+    QComboBox,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QVBoxLayout,
+    QWidget,
 )
 
-from .. import theme, store
-from .base import Page
-from ._ui import header_row, labeled_field, filter_action
-from ..widgets.common import breadcrumb, button, icon_button
+from .. import store, theme
 from ..widgets.blueprint import BlueprintFrame
 from ..widgets.combo import SearchableComboBox
+from ..widgets.common import breadcrumb, button, icon_button
+from ..widgets.dialog import form_dialog
 from ..widgets.flow import FlowRow
 from ..widgets.table import TableSection, transparent_cell
-from ..widgets.dialog import form_dialog
+from ._ui import filter_action, header_row, labeled_field
+from .base import Page
 
 ROLE_OPTIONS = [("all", "Все роли"), ("manager", "Менеджер"), ("stockman", "Кладовщик"), ("admin", "Администратор")]
 STATUS_OPTIONS = [("all", "Все статусы"), ("active", "Активен"), ("blocked", "Заблокирован")]

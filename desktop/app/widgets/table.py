@@ -6,17 +6,24 @@ Rows are ``(cells, payload)`` pairs. Each cell is one of:
     ("h", "text")              – heading-font cell (numbers)
     ("tag", text, color, bg)   – a coloured status/role pill
 """
-from PyQt6.QtCore import Qt, QEvent, QObject, QTimer, QPoint
+from PyQt6.QtCore import QEvent, QObject, QPoint, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QFontMetrics
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
-    QHeaderView, QLabel, QAbstractItemView, QStyledItemDelegate, QScrollArea
+    QAbstractItemView,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QScrollArea,
+    QStyledItemDelegate,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
 
 from .. import theme
 from .blueprint import BlueprintFrame
 from .common import Tag, button
-
 
 _CELL_PAD = 24          # QSS item padding (7px a side) + elide margin
 ELASTIC_MIN_WIDTH = 90  # narrowest an elastic column may be squeezed to

@@ -5,10 +5,15 @@ can only scroll. This subclass keeps the whole QComboBox API (addItem,
 currentData, currentIndexChanged …) and only replaces the popup with a small
 panel holding a filter field above a scrollable list.
 """
-from PyQt6.QtCore import Qt, QEvent, QPoint, QSize
+from PyQt6.QtCore import QEvent, QPoint, QSize, Qt
 from PyQt6.QtWidgets import (
-    QComboBox, QFrame, QVBoxLayout, QLineEdit, QListWidget, QListWidgetItem,
-    QAbstractItemView
+    QAbstractItemView,
+    QComboBox,
+    QFrame,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QVBoxLayout,
 )
 
 

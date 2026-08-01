@@ -1,14 +1,21 @@
 """Shared page-building helpers: header rows, search fields, stat cards."""
-from PyQt6.QtCore import Qt, QDate, QEvent, QSize
+from PyQt6.QtCore import QDate, QEvent, QSize, Qt
 from PyQt6.QtGui import QDoubleValidator
 from PyQt6.QtWidgets import (
-    QWidget, QHBoxLayout, QVBoxLayout, QLabel, QLineEdit, QGridLayout, QDateEdit,
-    QAbstractSpinBox, QSizePolicy
+    QAbstractSpinBox,
+    QDateEdit,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
 
 from .. import theme
-from ..widgets.common import h1, breadcrumb
 from ..widgets.blueprint import BlueprintFrame
+from ..widgets.common import h1
 
 
 def header_row(title, subtitle, action=None):
