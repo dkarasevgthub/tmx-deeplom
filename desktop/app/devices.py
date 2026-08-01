@@ -33,6 +33,9 @@ DEVICES = [("scanner", "Сканер"), ("printer", "Принтер"), ("scale",
 
 _RECONNECT_MS = 5000        # как часто пробовать поднять соединение заново
 _REQUEST_TIMEOUT_MS = 5000  # ответ службы ждём не дольше этого
+#: Весы отдают показания десять раз в секунду: если за это время вес не устоялся,
+#: коробку лучше отдать оператору, чем держать экран.
+_SCALE_TIMEOUT_MS = 1500
 _SCAN_DEDUP_MS = 500        # сканеры повторяют код при удержании кнопки
 
 
@@ -63,6 +66,7 @@ class DeviceClient(QObject):
         self._states = {key: OFFLINE for key, _ in DEVICES}
         self._connected = False
         self._last_scan = ("", 0)
+        self._last_weight = None         # последнее показание из потока
         self._enabled = False
 
         self._socket.connected.connect(self._on_connected)
@@ -101,6 +105,10 @@ class DeviceClient(QObject):
         if self._socket.state() != QLocalSocket.LocalSocketState.UnconnectedState:
             self._socket.disconnectFromServer()
         self._set_all(OFFLINE)
+
+    @property
+    def last_weight(self):
+        return self._last_weight
 
     @property
     def connected(self) -> bool:
@@ -190,7 +198,9 @@ class DeviceClient(QObject):
                     self._states[key] = state
                     bus.changed.emit()
         elif event == "weight":
-            self.weight_read.emit(_to_kg(frame), bool(frame.get("stable")))
+            kg = _to_kg(frame)
+            self._last_weight = kg
+            self.weight_read.emit(kg, bool(frame.get("stable")))
 
     # ── команды, требующие ответа ─────────────────────────────
     def _request(self, cmd, wait_ms=_REQUEST_TIMEOUT_MS, **fields):
@@ -225,7 +235,7 @@ class DeviceClient(QObject):
         timer.stop()
         return self._pending.pop(req_id, None)
 
-    def read_weight(self, scale_timeout_ms=_REQUEST_TIMEOUT_MS):
+    def read_weight(self, scale_timeout_ms=_SCALE_TIMEOUT_MS):
         """Устойчивый вес в килограммах или None, если весы не ответили.
 
         Своего ответа ждём чуть дольше, чем сами весы: иначе клиент сдастся
@@ -322,6 +332,11 @@ def live_weight(on: bool) -> None:
 def read_weight(expected_kg: float | None = None):
     """Вес коробки в килограммах или None, если весы не ответили."""
     return client.read_weight()
+
+
+def last_live_weight():
+    """Последнее показание из потока — чем заполнить ручной ввод."""
+    return client.last_weight
 
 
 def print_label(key: str, payload: str, copies: int = 1):

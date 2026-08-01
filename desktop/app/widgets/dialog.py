@@ -143,8 +143,12 @@ def form_dialog(parent, title, fields, on_save, submit_label="Сохранить
     return dlg.exec() == QDialog.DialogCode.Accepted
 
 
-def weight_dialog(parent, hint=None, title="Введите вес"):
-    """Manual weight entry — the scales are unavailable. Returns kg or None."""
+def weight_dialog(parent, hint=None, title="Введите вес", value=None):
+    """Manual weight entry — the scales are unavailable. Returns kg or None.
+
+    `value` подставляется в поле: когда весы показывают, но показание не
+    устоялось, оператору остаётся подтвердить цифру, а не набирать её.
+    """
     result = {}
 
     def on_save(values):
@@ -159,7 +163,8 @@ def weight_dialog(parent, hint=None, title="Введите вес"):
         return None
 
     label = "Вес, кг" + (f" ({hint})" if hint else "")
-    if form_dialog(parent, title, [("weight", label, "text", "")], on_save,
+    preset = "" if value is None else f"{value:.2f}"
+    if form_dialog(parent, title, [("weight", label, "text", preset)], on_save,
                    submit_label="Готово"):
         return result.get("weight")
     return None

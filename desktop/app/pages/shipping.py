@@ -640,8 +640,9 @@ class ShippingPage(Page):
         expected = qty * uw
         if devices.available("scale"):
             weight = devices.read_weight(expected)
-            if weight is None:      # весы молчат — не блокируем работу
-                weight = weight_dialog(self, hint="весы не ответили, введите вес")
+            if weight is None:      # вес не устоялся — не блокируем работу
+                weight = weight_dialog(self, hint="вес не устоялся, подтвердите",
+                                       value=devices.last_live_weight())
                 if weight is None:
                     return
         else:

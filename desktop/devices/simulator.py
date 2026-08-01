@@ -85,6 +85,9 @@ class SimulatorWindow(QWidget):
         self.weight_edit = QLineEdit()
         events_layout.addWidget(self.weight_edit, 1, 1)
         self.stable_cb = QCheckBox("Стабильно")
+        # без стабильного показания scale.read у службы уходит в таймаут,
+        # а приложение просит ввести вес руками — для проверки это не то
+        self.stable_cb.setChecked(True)
         events_layout.addWidget(self.stable_cb, 1, 2)
         self.weight_btn = QPushButton("Взвесить")
         events_layout.addWidget(self.weight_btn, 1, 3)

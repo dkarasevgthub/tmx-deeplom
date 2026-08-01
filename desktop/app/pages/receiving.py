@@ -581,8 +581,9 @@ class ReceivingPage(Page):
         if devices.available("scale"):
             actual = devices.read_weight(expected)
             if actual is None:
-                self._scan_error = "Весы не ответили — введите вес вручную."
-                actual = weight_dialog(self, hint=f"по заказу {expected:.1f} кг")
+                self._scan_error = "Вес на весах не устоялся — подтвердите вручную."
+                actual = weight_dialog(self, hint=f"по заказу {expected:.1f} кг",
+                                       value=devices.last_live_weight())
                 if actual is None:
                     self._render()
                     return
