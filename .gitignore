@@ -16,3 +16,23 @@ venv/
 
 # Рабочие данные приложения — у каждого свои
 desktop/mock_data.json
+
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Docker data
+pgdata/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

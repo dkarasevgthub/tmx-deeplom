@@ -1,0 +1,4 @@
+sqlalchemy==2.0.31
+alembic==1.13.1
+psycopg2-binary==2.9.9
+argon2-cffi==23.1.0
