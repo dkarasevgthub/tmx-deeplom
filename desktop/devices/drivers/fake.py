@@ -14,6 +14,9 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from ..protocol import (
     STATE_OFFLINE,
     STATE_ONLINE,
+    JOB_QUEUED,
+    JOB_PRINTING,
+    JOB_DONE,
 )
 from .base import DeviceDriver
 
@@ -95,16 +98,16 @@ class FakePrinter(DeviceDriver):
         """Queue a fake job and immediately finish it."""
         job_id = f"j-{len(self._jobs) + 1}"
         self._jobs[job_id] = {"key": key, "format": fmt, "copies": copies}
-        self.job_status_changed.emit(job_id, self.JOB_QUEUED, "")
-        self.job_status_changed.emit(job_id, self.JOB_PRINTING, "")
-        self.job_status_changed.emit(job_id, self.JOB_DONE, "")
-        return job_id, self.JOB_DONE
+        self.job_status_changed.emit(job_id, JOB_QUEUED, "")
+        self.job_status_changed.emit(job_id, JOB_PRINTING, "")
+        self.job_status_changed.emit(job_id, JOB_DONE, "")
+        return job_id, JOB_DONE
 
     def get_status(self, job_id: str) -> str | None:
-        return self.JOB_DONE if job_id in self._jobs else None
+        return JOB_DONE if job_id in self._jobs else None
 
     def get_queue(self) -> list[dict]:
-        return [{"job": jid, "state": self.JOB_DONE} for jid in self._jobs]
+        return [{"job": jid, "state": JOB_DONE} for jid in self._jobs]
 
     def retry(self, job_id: str) -> str | None:
-        return self.JOB_DONE if job_id in self._jobs else None
+        return JOB_DONE if job_id in self._jobs else None

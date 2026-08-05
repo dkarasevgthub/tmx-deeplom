@@ -423,8 +423,7 @@ class ShippingPage(Page):
         if not devices.available("printer"):
             note = QLabel(
                 "Каждая коробка маркируется этикеткой, поэтому без принтера "
-                "упаковать позицию и отгрузить заказ нельзя. Подключите принтер "
-                "или включите симуляцию.")
+                "упаковать позицию и отгрузить заказ нельзя. Подключите принтер.")
             note.setWordWrap(True)
             note.setStyleSheet(f"font-size:13px;color:{theme.DANGER};")
             fl.addWidget(note)
@@ -434,40 +433,54 @@ class ShippingPage(Page):
             pos = next(p for p in _positions(o) if p["article"] == self._active_article)
             remaining = pos["qty"] - _packed_qty(pd, pos["article"])
             top = QHBoxLayout()
-            box = QVBoxLayout(); box.setSpacing(2)
+            box = QVBoxLayout();
+            box.setSpacing(2)
             kick = QLabel("Упаковка позиции")
             kick.setStyleSheet(f"font-size:11px;color:{theme.ACCENT_RAMP[700]};text-transform:uppercase;")
-            name = QLabel(pos["name"]); name.setStyleSheet(f"font-family:{theme.font_heading()};font-size:18px;")
+            name = QLabel(pos["name"]);
+            name.setStyleSheet(f"font-family:{theme.font_heading()};font-size:18px;")
             meta = QLabel(f'Артикул {pos["article"]} · осталось упаковать {remaining} {pos["unit"]}')
             meta.setStyleSheet(f"font-size:13px;color:{theme.NEUTRAL[600]};")
-            box.addWidget(kick); box.addWidget(name); box.addWidget(meta)
-            top.addLayout(box); top.addStretch(1)
-            cancel = button("Отменить", "ghost"); cancel.clicked.connect(self._cancel_active)
+            box.addWidget(kick);
+            box.addWidget(name);
+            box.addWidget(meta)
+            top.addLayout(box);
+            top.addStretch(1)
+            cancel = button("Отменить", "ghost");
+            cancel.clicked.connect(self._cancel_active)
             top.addWidget(cancel, 0, Qt.AlignmentFlag.AlignTop)
             fl.addLayout(top)
 
             if self._weighed is None:
                 hint = QLabel("Упакуйте позицию в коробку, поставьте её на весы и нажмите «Считать вес».")
-                hint.setWordWrap(True); hint.setStyleSheet(f"font-size:13px;color:{theme.NEUTRAL[600]};")
+                hint.setWordWrap(True);
+                hint.setStyleSheet(f"font-size:13px;color:{theme.NEUTRAL[600]};")
                 fl.addWidget(hint)
                 label = "Считать вес" if devices.available("scale") else "Ввести вес"
-                read = button(label, "secondary"); read.clicked.connect(lambda: self._read_scale(o, pd))
+                read = button(label, "secondary");
+                read.clicked.connect(lambda: self._read_scale(o, pd))
                 fl.addWidget(read, 0, Qt.AlignmentFlag.AlignLeft)
             else:
-                res = QHBoxLayout(); res.setSpacing(theme.SP6)
+                res = QHBoxLayout();
+                res.setSpacing(theme.SP6)
                 res.addWidget(self._big_metric("Вес коробки", f'{self._weighed["weight"]} кг', theme.ACCENT_RAMP[700]))
-                res.addWidget(self._big_metric("Количество (расчёт по весу)", f'{self._weighed["qty"]} {pos["unit"]}', theme.TEXT))
+                res.addWidget(self._big_metric("Количество (расчёт по весу)", f'{self._weighed["qty"]} {pos["unit"]}',
+                                               theme.TEXT))
                 res.addStretch(1)
                 fl.addLayout(res)
                 btns = QHBoxLayout()
                 pr = button("Напечатать этикетку", "primary")
                 pr.clicked.connect(lambda: self._print_label(o, pd))
-                rw = button("Взвесить заново", "secondary"); rw.clicked.connect(self._reweigh)
-                btns.addWidget(pr); btns.addWidget(rw); btns.addStretch(1)
+                rw = button("Взвесить заново", "secondary");
+                rw.clicked.connect(self._reweigh)
+                btns.addWidget(pr);
+                btns.addWidget(rw);
+                btns.addStretch(1)
                 fl.addLayout(btns)
         else:
             hint = QLabel("Выберите позицию в списке «К упаковке», чтобы начать упаковку коробки.")
-            hint.setWordWrap(True); hint.setStyleSheet(f"font-size:13px;color:{theme.NEUTRAL[600]};")
+            hint.setWordWrap(True);
+            hint.setStyleSheet(f"font-size:13px;color:{theme.NEUTRAL[600]};")
             fl.addWidget(hint)
 
         if self._print_msg:

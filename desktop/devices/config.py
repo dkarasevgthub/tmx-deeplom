@@ -23,14 +23,12 @@ name = "prozapas-devices"
 idle_timeout_sec = 30        # 0 — never exit for lack of clients
 
 [scanner]
-port = ""                    # empty — device disabled (emulation mode)
+port = ""                    # empty — auto-search
 baud = 115200
-fake = true                  # true — stub driver, no real port
 
 [scale]
-port = "COM3"
+port = ""                    # empty — auto-search
 baud = 115200
-fake = true                  # true — эмуляция без порта, как у сканера
 model = "esp32"
 step_g = 10                  # grams, used to judge stability
 command_tare = "TARE"

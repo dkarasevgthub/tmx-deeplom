@@ -47,7 +47,7 @@ class SimulatorWindow(QWidget):
         }
         self.init_ui()
         self.setWindowTitle("Devices Service Simulator")
-        self.resize(900, 750)
+        self.resize(900, 850)
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -69,6 +69,26 @@ class SimulatorWindow(QWidget):
         conn_group.setLayout(conn_layout)
         main_layout.addWidget(conn_group)
 
+        # Панель подключения ролей (Attach / Detach)
+        roles_group = QGroupBox("Подключение ролей (Эмуляция)")
+        roles_layout = QGridLayout()
+
+        self.attach_scanner_btn = QPushButton("Подкл. Сканер")
+        self.detach_scanner_btn = QPushButton("Откл. Сканер")
+        self.attach_scale_btn = QPushButton("Подкл. Весы")
+        self.detach_scale_btn = QPushButton("Откл. Весы")
+        self.attach_printer_btn = QPushButton("Подкл. Принтер")
+        self.detach_printer_btn = QPushButton("Откл. Принтер")
+
+        roles_layout.addWidget(self.attach_scanner_btn, 0, 0)
+        roles_layout.addWidget(self.detach_scanner_btn, 0, 1)
+        roles_layout.addWidget(self.attach_scale_btn, 0, 2)
+        roles_layout.addWidget(self.detach_scale_btn, 0, 3)
+        roles_layout.addWidget(self.attach_printer_btn, 1, 0)
+        roles_layout.addWidget(self.detach_printer_btn, 1, 1)
+        roles_group.setLayout(roles_layout)
+        main_layout.addWidget(roles_group)
+
         # Панель быстрых команд (эмуляция событий)
         events_group = QGroupBox("Эмуляция событий")
         events_layout = QGridLayout()
@@ -85,8 +105,6 @@ class SimulatorWindow(QWidget):
         self.weight_edit = QLineEdit()
         events_layout.addWidget(self.weight_edit, 1, 1)
         self.stable_cb = QCheckBox("Стабильно")
-        # без стабильного показания scale.read у службы уходит в таймаут,
-        # а приложение просит ввести вес руками — для проверки это не то
         self.stable_cb.setChecked(True)
         events_layout.addWidget(self.stable_cb, 1, 2)
         self.weight_btn = QPushButton("Взвесить")
@@ -95,7 +113,7 @@ class SimulatorWindow(QWidget):
         # Состояние устройства
         events_layout.addWidget(QLabel("Устройство:"), 2, 0)
         self.device_combo = QComboBox()
-        self.device_combo.addItems(["Сканер", "Весы", "Принтер"])
+        self.device_combo.addItems(["scanner", "scale", "printer"])
         events_layout.addWidget(self.device_combo, 2, 1)
 
         events_layout.addWidget(QLabel("Состояние:"), 2, 2)
@@ -187,9 +205,9 @@ class SimulatorWindow(QWidget):
         # Индикаторы состояний устройств
         status_group = QGroupBox("Состояния устройств")
         status_layout = QHBoxLayout()
-        self.ind_scan = QLabel("Сканер: неизвестно")
-        self.ind_weight = QLabel("Весы: неизвестно")
-        self.ind_printer = QLabel("Принтер: неизвестно")
+        self.ind_scan = QLabel("scanner: неизвестно")
+        self.ind_weight = QLabel("scale: неизвестно")
+        self.ind_printer = QLabel("printer: неизвестно")
         for lbl in (self.ind_scan, self.ind_weight, self.ind_printer):
             lbl.setFrameStyle(QFrame.Shape.Box | QFrame.Shadow.Sunken)
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -199,6 +217,16 @@ class SimulatorWindow(QWidget):
         status_layout.addStretch()
         status_group.setLayout(status_layout)
         main_layout.addWidget(status_group)
+
+        # Окно ZPL (входящие задания)
+        zpl_group = QGroupBox("Входящие задания печати (Print Jobs)")
+        zpl_layout = QVBoxLayout()
+        self.zpl_text = QTextEdit()
+        self.zpl_text.setFontFamily("monospace")
+        self.zpl_text.setReadOnly(True)
+        zpl_layout.addWidget(self.zpl_text)
+        zpl_group.setLayout(zpl_layout)
+        main_layout.addWidget(zpl_group)
 
         # Лог-окно
         log_group = QGroupBox("Лог")
@@ -233,6 +261,13 @@ class SimulatorWindow(QWidget):
 
         self.shutdown_btn.clicked.connect(self.send_shutdown)
 
+        self.attach_scanner_btn.clicked.connect(lambda: self.send_attach(["scanner"]))
+        self.detach_scanner_btn.clicked.connect(lambda: self.send_detach(["scanner"]))
+        self.attach_scale_btn.clicked.connect(lambda: self.send_attach(["scale"]))
+        self.detach_scale_btn.clicked.connect(lambda: self.send_detach(["scale"]))
+        self.attach_printer_btn.clicked.connect(lambda: self.send_attach(["printer"]))
+        self.detach_printer_btn.clicked.connect(lambda: self.send_detach(["printer"]))
+
     # ---------- Сокет и отправка ----------
     def connect_to_server(self):
         if self.socket and self.socket.state() == QLocalSocket.LocalSocketState.ConnectedState:
@@ -261,9 +296,8 @@ class SimulatorWindow(QWidget):
         self.status_label.setText("Подключено")
         self.status_label.setStyleSheet("color: green;")
         self.log("Подключено к каналу", "info")
-        # сразу спрашиваем состояния, иначе индикаторы висят «неизвестно»
-        # до первого события device
         self.send_devices()
+        self.send_subscribe()
 
     def on_disconnected(self):
         self.status_label.setText("Отключено")
@@ -274,11 +308,8 @@ class SimulatorWindow(QWidget):
             self.socket = None
 
     def on_error(self, error):
-        # Qt на Windows зовёт отсутствующий канал «Invalid name» — по этой строке
-        # не догадаться, что служба просто не запущена; пишем прямо
         if error == QLocalSocket.LocalSocketError.ServerNotFoundError:
-            msg = ("канал не найден — служба не запущена "
-                   "(python -m devices)")
+            msg = "канал не найден — служба не запущена (python -m devices)"
         else:
             msg = self.socket.errorString() if self.socket else str(error)
         self.status_label.setText("Ошибка")
@@ -318,25 +349,19 @@ class SimulatorWindow(QWidget):
             self.log(f"← [невалидный JSON] {line}", "error")
             return
 
-        # Обработка события
         if "event" in data:
             event = data["event"]
             if event == "device":
                 self.handle_device_event(data)
+            elif event == "print.job":
+                self.handle_print_job(data)
             self.log(f"{json.dumps(data, ensure_ascii=False)}", "received")
             return
 
-        # Обработка ответа с ошибкой
         if "error" in data:
-            error_msg = data["error"]
-            if isinstance(error_msg, dict):
-                error_text = error_msg.get("message", str(error_msg))
-            else:
-                error_text = str(error_msg)
             self.log(f"{json.dumps(data, ensure_ascii=False)}", "error")
             return
 
-        # Ответ на `devices` — заодно поднимаем индикаторы
         devices = data.get("devices")
         if isinstance(devices, dict):
             for dev, state in devices.items():
@@ -344,54 +369,50 @@ class SimulatorWindow(QWidget):
                     self.device_states[dev] = state
             self.update_device_indicators()
 
-        # Обычный ответ
         self.log(f"{json.dumps(data, ensure_ascii=False)}", "received")
 
     def handle_device_event(self, data):
-        # служба шлёт id/state, старые сборки — device/status
-        device = data.get("id") or data.get("device")
+        device = data.get("device") or data.get("id")
         status = data.get("state") or data.get("status")
         reason = data.get("reason", "")
         if device not in self.device_states:
             return
         self.device_states[device] = status
         self.update_device_indicators()
-        # Логируем с дополнительной информацией
         log_msg = f"событие device: {device} -> {status}"
         if reason:
             log_msg += f" (причина: {reason})"
         self.log(log_msg, "received")
 
+    def handle_print_job(self, data):
+        job_id = data.get("job", "")
+        payload = data.get("payload", "")
+        self.zpl_text.append(f"--- Job: {job_id} ---\n{payload}\n")
+        # Авто-подтверждение задания (Auto-ack)
+        self.send_request("emit", event="job", job=job_id, state="done")
+
     def update_device_indicators(self):
-        # Обновляем текстовые метки и цвета
         mapping = {
             "scanner": self.ind_scan,
             "scale": self.ind_weight,
             "printer": self.ind_printer,
         }
-        # Исправляем названия для отображения
-        display_names = {
-            "scanner": "Сканер",
-            "scale": "Весы",
-            "printer": "Принтер"
-        }
         for dev, lbl in mapping.items():
             state = self.device_states.get(dev)
-            display_name = display_names.get(dev, dev.capitalize())
             if state is None:
-                lbl.setText(f"{display_name}: неизвестно")
+                lbl.setText(f"{dev}: неизвестно")
                 lbl.setStyleSheet("background-color: lightgray;")
             elif state == "online":
-                lbl.setText(f"{display_name}: online")
+                lbl.setText(f"{dev}: online")
                 lbl.setStyleSheet("background-color: lightgreen;")
             elif state == "offline":
-                lbl.setText(f"{display_name}: offline")
+                lbl.setText(f"{dev}: offline")
                 lbl.setStyleSheet("background-color: lightcoral;")
             elif state == "error":
-                lbl.setText(f"{display_name}: error")
+                lbl.setText(f"{dev}: error")
                 lbl.setStyleSheet("background-color: yellow;")
             else:
-                lbl.setText(f"{display_name}: {state}")
+                lbl.setText(f"{dev}: {state}")
                 lbl.setStyleSheet("background-color: lightgray;")
 
     # ---------- Логирование ----------
@@ -410,7 +431,6 @@ class SimulatorWindow(QWidget):
         if msg_type == "error":
             full = f'<font color="red">{full}</font>'
         self.log_text.append(full)
-        # Автопрокрутка вниз
         cursor = self.log_text.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         self.log_text.setTextCursor(cursor)
@@ -423,19 +443,25 @@ class SimulatorWindow(QWidget):
         self.send_request("devices")
 
     def send_subscribe(self):
-        events = ["scan", "weight", "device", "job"]
+        events = ["scan", "weight", "device", "job", "print.job"]
         self.send_request("subscribe", events=events)
 
     def send_unsubscribe(self):
-        events = ["scan", "weight", "device", "job"]
+        events = ["scan", "weight", "device", "job", "print.job"]
         self.send_request("unsubscribe", events=events)
+
+    def send_attach(self, devices):
+        self.send_request("attach", devices=devices)
+
+    def send_detach(self, devices):
+        self.send_request("detach", devices=devices)
 
     def send_scan(self):
         code = self.scan_code_edit.text().strip()
         if not code:
             self.log("Введите код скана", "error")
             return
-        self.send_request("debug_emit", event="scan", code=code)
+        self.send_request("emit", event="scan", code=code)
 
     def send_weight(self):
         val_text = self.weight_edit.text().strip()
@@ -448,18 +474,16 @@ class SimulatorWindow(QWidget):
             self.log("Вес должен быть числом", "error")
             return
         stable = self.stable_cb.isChecked()
-        self.send_request("debug_emit", event="weight", value=value, unit="g", stable=stable)
+        self.send_request("emit", event="weight", value=value, unit="g", stable=stable)
 
     def send_device_state(self):
-        dev_map = {"Сканер": "scanner", "Весы": "scale", "Принтер": "printer"}
-        device_name = self.device_combo.currentText()
-        device = dev_map[device_name]
+        device = self.device_combo.currentText()
         state = self.state_combo.currentText()
         reason = self.reason_edit.text().strip()
         kwargs = {"event": "device", "device": device, "state": state}
         if reason:
             kwargs["reason"] = reason
-        self.send_request("debug_emit", **kwargs)
+        self.send_request("emit", **kwargs)
 
     def send_print(self):
         key = self.print_key_edit.text().strip()
@@ -487,14 +511,14 @@ class SimulatorWindow(QWidget):
         if not job_id:
             self.log("Введите Job ID", "error")
             return
-        self.send_request("print.status", job=job_id)  # было job_id
+        self.send_request("print.status", job=job_id)
 
     def send_print_retry(self):
         job_id = self.job_id_edit.text().strip()
         if not job_id:
             self.log("Введите Job ID", "error")
             return
-        self.send_request("print.retry", job=job_id)  # было job_id
+        self.send_request("print.retry", job=job_id)
 
     def send_scale_read(self):
         self.send_request("scale.read", stable=True, timeout_ms=5000)
@@ -505,7 +529,6 @@ class SimulatorWindow(QWidget):
     def send_shutdown(self):
         self.send_request("shutdown")
 
-    # ---------- Закрытие окна ----------
     def closeEvent(self, event):
         self.disconnect_from_server()
         event.accept()

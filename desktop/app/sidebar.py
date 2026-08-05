@@ -28,7 +28,6 @@ NAV_ITEMS = [
     ("users", "Пользователи", "users"),
 ]
 
-# .navrow in the mockup: padding 10.2px vertical + a 16px/1.55 line box ≈ 45px
 NAV_ROW_HEIGHT = 45
 ICON_SIZE = theme.ICON_SIZE
 
@@ -47,8 +46,6 @@ class NavRow(QWidget):
 
         color = theme.ACCENT_RAMP[800] if is_active else theme.TEXT
         marker = theme.ACCENT if is_active else "transparent"
-        # the active row carries the page background so it reads as one surface
-        # with the content area next to it (the mockup tints it accent-100)
         bg = theme.BG if is_active else "transparent"
         hover_bg = theme.BG if is_active else theme.ACCENT_RAMP[100]
         self.setStyleSheet(
@@ -59,7 +56,6 @@ class NavRow(QWidget):
         )
 
         lay = QHBoxLayout(self)
-        # 2px of the 14px left inset is taken by the border-left marker
         lay.setContentsMargins(theme.SP4 - 2, 0, theme.SP4, 0)
         lay.setSpacing(theme.SP3)
 
@@ -69,7 +65,6 @@ class NavRow(QWidget):
         lay.addWidget(icon_label)
 
         text = QLabel(title)
-        # .navrow sets no font-weight in the mockup → regular, not semibold
         text.setStyleSheet(
             f"font-family:{theme.font_heading()};font-size:16px;color:{color};"
         )
@@ -87,6 +82,7 @@ class DeviceRow(QWidget):
 
     _DOT = {devices.ONLINE: theme.ACCENT, devices.ERROR: theme.DANGER,
             devices.OFFLINE: theme.NEUTRAL[400]}
+    _SIM_DOT_COLOR = theme.ACCENT2_RAMP[700] if hasattr(theme, 'ACCENT2_RAMP') else "#FFA500"
 
     def __init__(self, title, state, parent=None):
         super().__init__(parent)
@@ -109,12 +105,20 @@ class DeviceRow(QWidget):
         lay.addWidget(self._state)
         self.set_state(state)
 
-    def set_state(self, state):
-        color = self._DOT.get(state, theme.NEUTRAL[400])
+    def set_state(self, state, simulated=False):
+        if simulated:
+            color = self._SIM_DOT_COLOR
+        else:
+            color = self._DOT.get(state, theme.NEUTRAL[400])
         self._dot.setStyleSheet(f"font-size:9px;color:{color};")
-        self._state.setText(devices.STATE_LABELS.get(state, state))
+
+        state_text = devices.STATE_LABELS.get(state, state)
+        if simulated:
+            state_text += " (эмуляция)"
+
+        self._state.setText(state_text)
         self._state.setStyleSheet(f"font-size:11px;color:{theme.NEUTRAL[600]};")
-        self.setToolTip(f"{self._name.text()}: {self._state.text()}")
+        self.setToolTip(f"{self._name.text()}: {state_text}")
 
 
 class Sidebar(QWidget):
@@ -141,7 +145,6 @@ class Sidebar(QWidget):
         root.addLayout(self._nav(active), 1)
         root.addWidget(self._footer())
 
-    # ── blocks ────────────────────────────────────────────────
     def _brand(self):
         box = QWidget()
         box.setObjectName("brandBox")
@@ -218,7 +221,6 @@ class Sidebar(QWidget):
         out.setIcon(QIcon(svg_pixmap("logout", theme.NEUTRAL[600], ICON_SIZE)))
         out.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
         out.setFixedWidth(46)
-        # .logoutbtn in the mockup stretches to the row's full height
         out.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         out.setCursor(Qt.CursorShape.PointingHandCursor)
         out.setToolTip("Выйти")
@@ -274,5 +276,9 @@ class Sidebar(QWidget):
     def _refresh_devices(self):
         """Pull the current state of every device into the footer."""
         current = devices.states()
+        # Предполагаем, что у devices может быть метод для получения флага симуляции
+        simulated_devices = getattr(devices, 'simulated_states', lambda: {})()
         for key, row in getattr(self, "_device_rows", {}).items():
-            row.set_state(current.get(key, devices.OFFLINE))
+            state = current.get(key, devices.OFFLINE)
+            simulated = simulated_devices.get(key, False)
+            row.set_state(state, simulated)
