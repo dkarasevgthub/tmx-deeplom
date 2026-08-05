@@ -128,7 +128,9 @@ class ScaleDriver(DeviceDriver):
             error = serial.errorString()
             logger.error("ScaleDriver: failed to open %s – %s", self._port_name, error)
             _claimed_ports.discard(self._port_name)
-            self._set_state(STATE_ERROR, error)
+            # Уходим в поиск, а не в ошибку
+            self._port_name = ""
+            self._set_state(STATE_OFFLINE, "searching")
             return
 
         serial.readyRead.connect(self._on_ready_read)
@@ -185,10 +187,9 @@ class ScaleDriver(DeviceDriver):
             if self._serial.isOpen():
                 self._serial.close()
             _claimed_ports.discard(self._port_name)
-            # Reset port_name to trigger auto-search on reconnect
+            # Уходим в поиск, а не в ошибку
             self._port_name = ""
-            self._set_state(STATE_OFFLINE, f"port error: {msg}")
-
+            self._set_state(STATE_OFFLINE, "searching")
     # --- Parsing ---------------------------------------------------------
 
     def _handle_line(self, line: str) -> None:

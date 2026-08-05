@@ -118,7 +118,7 @@ class DeviceServer(QObject):
         slot = self._scanner_slot
         if self.sender() != slot.active_driver():
             return
-        self.broadcast(EVENT_SCAN, {"code": code, "device": slot.device_id})
+        self.broadcast(EVENT_SCAN, {"code": code, "device": slot.device_id, "id": slot.device_id})
 
     def _on_weight(self, value: float, unit: str, stable: bool) -> None:
         """Broadcast a ``weight`` event from the scale."""
@@ -138,9 +138,10 @@ class DeviceServer(QObject):
         """Broadcast a ``device`` event on a state change."""
         slot = self.sender()
         if isinstance(slot, DeviceSlot):
+            # ВАЖНО: отправляем и 'id', и 'device' для обратной совместимости
             self.broadcast(
                 EVENT_DEVICE,
-                {"device": slot.device_id, "state": state, "reason": reason},
+                {"id": slot.device_id, "device": slot.device_id, "state": state, "reason": reason},
             )
 
     # --- Connection handling --------------------------------------------

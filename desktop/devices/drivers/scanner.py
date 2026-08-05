@@ -125,8 +125,15 @@ class ScannerDriver(DeviceDriver):
             logger.error("ScannerDriver: failed to open %s – %s", self._port_name, error)
             _claimed_ports.discard(self._port_name)
             serial.deleteLater()
-            self._set_state(STATE_ERROR, error)
+            # Уходим в поиск, а не в ошибку
+            self._port_name = ""
+            self._set_state(STATE_OFFLINE, "searching")
             return
+
+        serial.readyRead.connect(self._on_ready_read)
+        serial.errorOccurred.connect(self._on_error_occurred)
+        self._serial = serial
+        self._set_state(STATE_ONLINE, "port opened")
 
         serial.readyRead.connect(self._on_ready_read)
         serial.errorOccurred.connect(self._on_error_occurred)
@@ -176,16 +183,14 @@ class ScannerDriver(DeviceDriver):
             return
         msg = self._serial.errorString() if self._serial else str(error)
         logger.warning("ScannerDriver: port error (%s): %s", error, msg)
-        # Resource errors mean the port is gone: drop it and reconnect.
         if (
             error == QSerialPort.SerialPortError.ResourceError
             or error == QSerialPort.SerialPortError.DeviceNotFoundError
         ):
             self._close_serial()
-            # Reset port_name to trigger auto-search on reconnect
             self._port_name = ""
-            self._set_state(STATE_OFFLINE, f"port error: {msg}")
-
+            # Уходим в поиск, а не в ошибку
+            self._set_state(STATE_OFFLINE, "searching")
     # --- Parsing ---------------------------------------------------------
 
     def _feed_bytes(self, data: bytes) -> None:
