@@ -1,4 +1,8 @@
-"""Entry point for devices."""
+"""Entry point for devices.
+
+Creates the Qt application, loads configuration from CLI/ENV, initialises
+drivers, starts the named-pipe server, and runs the event loop.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +13,7 @@ import sys
 
 from PyQt6.QtCore import QCoreApplication, QTimer
 
-from .config import list_ports, list_printers, load_config
+from .config import get_default_config, list_ports, list_printers
 from .drivers.fake import FakePrinter, FakeScale, FakeScanner
 from .drivers.printer import PrinterDriver
 from .drivers.scale import ScaleDriver
@@ -34,8 +38,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         metavar="SEC",
-        help="Override [pipe] idle_timeout_sec; 0 disables the timeout.",
+        help="Override idle_timeout_sec; 0 disables the timeout.",
     )
+    # Динамическая конфигурация оборудования
+    parser.add_argument("--scanner-port", type=str, default=None, help="Override scanner COM port.")
+    parser.add_argument("--scale-port", type=str, default=None, help="Override scale COM port.")
+    parser.add_argument("--printer-name", type=str, default=None, help="Override printer name.")
     return parser.parse_args()
 
 
@@ -92,11 +100,18 @@ def main() -> None:
             print(printer_name)
         return
 
-    try:
-        config = load_config()
-    except Exception as exc:
-        print(f"configuration broken: {exc}", file=sys.stderr)
-        sys.exit(3)
+    # Получаем дефолтную конфигурацию (из ENV)
+    config = get_default_config()
+
+    # Перекрываем аргументами командной строки, если они переданы
+    if args.scanner_port is not None:
+        config["scanner"]["port"] = args.scanner_port
+    if args.scale_port is not None:
+        config["scale"]["port"] = args.scale_port
+    if args.printer_name is not None:
+        config["printer"]["name"] = args.printer_name
+    if args.idle_timeout is not None:
+        config["pipe"]["idle_timeout_sec"] = args.idle_timeout
 
     setup_logging(config)
 
@@ -127,8 +142,6 @@ def main() -> None:
     pipe_cfg = config.get("pipe", {})
     pipe_name = pipe_cfg.get("name", "prozapas-devices")
     idle_timeout = float(pipe_cfg.get("idle_timeout_sec", 30))
-    if args.idle_timeout is not None:
-        idle_timeout = args.idle_timeout
 
     if not server.start(pipe_name):
         logger.error("Pipe %s already in use, exiting", pipe_name)
