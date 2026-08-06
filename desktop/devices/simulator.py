@@ -5,9 +5,10 @@ Simulator GUI для ручного тестирования службы device
 
 import datetime
 import json
+import random
 import sys
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtNetwork import QLocalSocket
 from PyQt6.QtWidgets import (
     QApplication,
@@ -36,6 +37,9 @@ except ImportError:
 
 
 class SimulatorWindow(QWidget):
+    #: Сколько тактов груз «оседает», прежде чем весы объявят вес устойчивым.
+    STREAM_SETTLE_TICKS = 12          # ≈1.2 секунды при 10 Гц
+
     def __init__(self):
         super().__init__()
         self.socket = None
@@ -47,6 +51,12 @@ class SimulatorWindow(QWidget):
         }
         # Отслеживание подключенных ролей
         self.attached_devices = set()
+
+        # Поток показаний весов — настоящие весы шлют ~10 раз в секунду
+        self._settling = 0
+        self.stream_timer = QTimer(self)
+        self.stream_timer.setInterval(100)
+        self.stream_timer.timeout.connect(self._stream_tick)
 
         self.init_ui()
         self.setWindowTitle("Devices Service Simulator")
@@ -193,6 +203,19 @@ class SimulatorWindow(QWidget):
         weight_row.addWidget(self.weight_btn)
         layout.addLayout(weight_row)
 
+        # Поток показаний: разовое «Взвесить» не воспроизводит живые весы —
+        # там цифра дрожит и лишь потом замирает. Без потока не проверить ни
+        # обновление панели, ни переход «неустойчиво → устойчиво».
+        stream_row = QHBoxLayout()
+        self.stream_cb = QCheckBox("Поток 10 Гц")
+        self.stream_cb.toggled.connect(self.toggle_stream)
+        self.settle_btn = QPushButton("Стабилизировать")
+        self.settle_btn.clicked.connect(self.settle_stream)
+        stream_row.addWidget(self.stream_cb)
+        stream_row.addWidget(self.settle_btn)
+        stream_row.addStretch(1)
+        layout.addLayout(stream_row)
+
         # Смена состояния
         state_row = QHBoxLayout()
         self.scale_state_combo = QComboBox()
@@ -255,7 +278,9 @@ class SimulatorWindow(QWidget):
 
         widgets = [
             (self.scan_sim_cb, self.scan_code_edit, self.scan_btn, self.scan_state_combo, self.scan_state_btn),
-            (self.scale_sim_cb, self.weight_edit, self.stable_cb, self.weight_btn, self.scale_state_combo, self.scale_state_btn, self.scale_read_btn, self.scale_tare_btn),
+            (self.scale_sim_cb, self.weight_edit, self.stable_cb, self.weight_btn,
+             self.stream_cb, self.settle_btn,
+             self.scale_state_combo, self.scale_state_btn, self.scale_read_btn, self.scale_tare_btn),
             (self.printer_sim_cb, self.printer_state_combo, self.printer_state_btn, self.print_key_edit, self.print_btn)
         ]
 
@@ -277,6 +302,8 @@ class SimulatorWindow(QWidget):
         if checked:
             self.send_request("attach", devices=[device])
         else:
+            if device == "scale":
+                self.stream_cb.setChecked(False)   # отдали весы — поток ни к чему
             self.send_request("detach", devices=[device])
         self._update_ui_states()
 
@@ -319,6 +346,7 @@ class SimulatorWindow(QWidget):
         self.status_label.setText("Отключено")
         self.status_label.setStyleSheet("color: gray;")
         self.log("Отключено от канала", "info")
+        self.stream_cb.setChecked(False)   # иначе поток будет писать в мёртвый сокет
         if self.socket:
             self.socket.deleteLater()
             self.socket = None
@@ -378,11 +406,10 @@ class SimulatorWindow(QWidget):
         # Обработка ответов на attach/detach
         req_id = data.get("id")
         if data.get("ok"):
-            attached = data.get("attached", [])
-            # Если это ответ на attach (мы знаем, что отправляли)
-            # Просто обновляем список того, чем мы владеем
-            # (в реальности можно сверять с отправленным запросом, но для UI достаточно)
-            pass
+            # Служба в ответе на attach/detach присылает актуальный список ролей —
+            # берём его целиком, чтобы своё представление не разъезжалось с её.
+            if "attached" in data:
+                self.attached_devices = set(data["attached"])
         elif "error" in data:
             err_code = data["error"].get("code")
             if err_code == "busy":
@@ -488,6 +515,40 @@ class SimulatorWindow(QWidget):
             return
         stable = self.stable_cb.isChecked()
         self.send_request("emit", event="weight", value=value, unit="g", stable=stable)
+
+    # ---------- Поток показаний ----------
+    def toggle_stream(self, on):
+        """Включить или выключить поток веса."""
+        if not on:
+            self.stream_timer.stop()
+            self.log("Поток весов остановлен")
+            return
+        if not self.weight_edit.text().strip():
+            self.log("Введите вес, вокруг которого дрожать", "error")
+            self.stream_cb.setChecked(False)
+            return
+        self._settling = self.STREAM_SETTLE_TICKS
+        self.stream_timer.start()
+        self.log("Поток весов запущен: 10 раз в секунду")
+
+    def settle_stream(self):
+        """Прекратить дрожание — как будто груз успокоился на платформе."""
+        self._settling = 0
+
+    def _stream_tick(self):
+        """Одно показание: пока груз «оседает» — дрожит и неустойчиво."""
+        try:
+            base = float(self.weight_edit.text().strip())
+        except ValueError:
+            self.stream_cb.setChecked(False)
+            return
+        if self._settling > 0:
+            self._settling -= 1
+            value, stable = base + random.uniform(-40.0, 40.0), False
+        else:
+            value, stable = base, True
+        self.send_request("emit", event="weight",
+                          value=round(value, 1), unit="g", stable=stable)
 
     def send_device_state(self, device, state):
         self.send_request("emit", event="device", device=device, state=state, reason="manual override")

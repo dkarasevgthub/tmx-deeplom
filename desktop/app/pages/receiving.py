@@ -445,12 +445,11 @@ class ReceivingPage(Page):
         fl = frame.content_layout()
         fl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         k = QLabel("Весы"); k.setObjectName("kicker"); k.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # пока весы шлют показания, панель живёт ими; иначе остаётся последний
-        # взвешенный результат
-        live = self._live if devices.available("scale") and self._live else None
+        # Панель всегда показывает текущий вес на весах, включая ноль. Прочерк
+        # означает только одно: весов нет либо служба ещё не дала показания.
         stable = True
-        if live is not None:
-            reading, stable = f"{live[0]:.1f} кг", live[1]
+        if devices.available("scale") and self._live is not None:
+            reading, stable = f"{self._live[0]:.1f} кг", self._live[1]
         else:
             reading = f"{self._last_weight} кг" if self._last_weight else "—"
         r = QLabel(reading); r.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -578,16 +577,12 @@ class ReceivingPage(Page):
             return
         item = self._active_box
         expected = float(item["expectedWeight"])
-        if devices.available("scale"):
-            actual = devices.read_weight(expected)
-            if actual is None:
-                self._scan_error = "Вес на весах не устоялся — подтвердите вручную."
-                actual = weight_dialog(self, hint=f"по заказу {expected:.1f} кг",
-                                       value=devices.last_live_weight())
-                if actual is None:
-                    self._render()
-                    return
+        # Второй скан той же коробки фиксирует вес: коробка уже на весах, и
+        # записывается ровно то число, которое кладовщик видит на панели.
+        if devices.available("scale") and self._live is not None:
+            actual = self._live[0]
         else:
+            # Весов нет (или поток ещё ничего не дал) — спрашиваем вручную
             actual = weight_dialog(self, hint=f"по заказу {expected:.1f} кг")
             if actual is None:
                 return

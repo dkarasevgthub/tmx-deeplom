@@ -122,6 +122,9 @@ ALL_EVENTS: set[str] = {
     EVENT_WEIGHT,
     EVENT_DEVICE,
     EVENT_JOB,
+    # Задание на печать, развёрнутое в сторону симулятора. Без него `subscribe`
+    # молча отбрасывал подписку, и задание не доезжало до подменного принтера.
+    EVENT_PRINT_JOB,
 }
 
 

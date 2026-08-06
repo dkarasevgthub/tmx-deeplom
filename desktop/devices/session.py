@@ -37,6 +37,7 @@ from .protocol import (
     ERR_SCALE_TIMEOUT,
     ERR_UNKNOWN_COMMAND,
     EVENT_JOB,
+    EVENT_WEIGHT,
     JOB_DONE,
     JOB_QUEUED,
     PRINT_FORMATS,
@@ -198,10 +199,26 @@ class ClientSession(QObject):
         if not isinstance(events, list):
             self._reply(req_id, make_error(req_id, ERR_BAD_REQUEST, "'events' must be a list"))
             return
+        fresh_weight = EVENT_WEIGHT in events and EVENT_WEIGHT not in self._subscriptions
         for evt in events:
             if evt in ALL_EVENTS:
                 self._subscriptions.add(evt)
         self._reply(req_id, make_response(req_id, True, subscribed=sorted(self._subscriptions)))
+        if fresh_weight:
+            self._push_current_weight()
+
+    def _push_current_weight(self) -> None:
+        """Отдать последнее показание сразу после подписки.
+
+        Драйвер шлёт событие только при изменении, поэтому на неподвижных весах
+        новый подписчик не услышал бы ничего и показывал бы прочерк вместо нуля.
+        """
+        scale = self._scale_slot.active_driver()
+        reading = getattr(scale, "last_reading", lambda: None)()
+        if reading is None:
+            return
+        value, unit, stable = reading
+        self.send_event(EVENT_WEIGHT, {"value": value, "unit": unit, "stable": stable})
 
     def _cmd_unsubscribe(self, req_id: Any, request: dict[str, Any]) -> None:
         events = request.get("events", []) or []

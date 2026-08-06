@@ -178,10 +178,14 @@ class ShippingPage(Page):
         devices.live_weight(self._active_id is not None)
 
     def _on_live_weight(self, kg, stable):
-        """Показание с весов — панель обновляется, не перерисовывая экран."""
+        """Показание с весов — панель обновляется, не перерисовывая экран.
+
+        Панель показывает то, что на весах прямо сейчас, всегда. Вес уже
+        взвешенной коробки живёт отдельной метрикой и потоком не затирается.
+        """
         self._live = (kg, stable)
-        if self._scale_value is None or self._weighed is not None:
-            return                      # взвешенное значение живой поток не трёт
+        if self._scale_value is None:
+            return
         try:
             self._scale_value.setText(f"{kg:.2f} кг")
             self._scale_value.setStyleSheet(self._scale_style(stable))
@@ -502,12 +506,10 @@ class ShippingPage(Page):
         fl = frame.content_layout()
         fl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         k = QLabel("Весы"); k.setObjectName("kicker"); k.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # взвешенная коробка держит своё значение; до этого панель живёт
-        # потоком с весов
+        # Панель всегда показывает текущий вес на весах, включая ноль. Прочерк
+        # означает только одно: весов нет либо служба ещё не дала показания.
         stable = True
-        if self._weighed:
-            reading = self._weighed["weight"] + " кг"
-        elif devices.available("scale") and self._live:
+        if devices.available("scale") and self._live is not None:
             reading, stable = f"{self._live[0]:.2f} кг", self._live[1]
         else:
             reading = "—"
@@ -648,18 +650,12 @@ class ShippingPage(Page):
         if remaining <= 0:
             return
         uw = _uw(pos["article"])
-        per_box = max(1, int(MAX_BOX_WEIGHT // uw))
-        qty = min(remaining, per_box)
-        expected = qty * uw
-        if devices.available("scale"):
-            weight = devices.read_weight(expected)
-            if weight is None:      # вес не устоялся — не блокируем работу
-                weight = weight_dialog(self, hint="вес не устоялся, подтвердите",
-                                       value=devices.last_live_weight())
-                if weight is None:
-                    return
+        # Весы на связи — записываем ровно то число, которое кладовщик видит на
+        # панели. Ни запроса к службе, ни подтверждения: коробка уже на весах.
+        if devices.available("scale") and self._live is not None:
+            weight = self._live[0]
         else:
-            # no scales: the operator reads the display and types the weight in
+            # Весов нет (или поток ещё ничего не дал) — оператор читает табло сам
             weight = weight_dialog(self, hint=f"не более {MAX_BOX_WEIGHT:.0f} кг на коробку")
             if weight is None:
                 return

@@ -16,7 +16,8 @@ from PyQt6.QtWidgets import (
 )
 
 from . import devices, store, theme
-from .widgets.common import svg_pixmap
+from .widgets.common import button, svg_pixmap
+from .widgets.devicelog import show_device_log
 
 NAV_ITEMS = [
     ("home", "Главная", "home"),
@@ -266,6 +267,13 @@ class Sidebar(QWidget):
 
         devices.bus.changed.connect(self._refresh_devices)
         self._refresh_devices()
+
+        # Журнал обмена: единственный способ увидеть из приложения, шлёт ли
+        # подключённое железо хоть что-нибудь. Открывается отдельным окном,
+        # чтобы приложением можно было пользоваться с ним параллельно.
+        logs = button("Логи", "ghost")
+        logs.clicked.connect(lambda: show_device_log())
+        lay.addWidget(logs)
 
         lay.addSpacing(theme.SP2)
         v = QLabel("Версия 1.0")

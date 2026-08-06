@@ -4,10 +4,16 @@ Connects to the device service's named pipe as an ordinary client and
 either runs a single command (when given arguments) or drops into an
 interactive prompt that reads commands from stdin.
 
-Commands map either to ordinary protocol requests or to the service-only
-``debug_emit`` command used to inject events (scan / weight / device)
-for testing scenarios that would otherwise need real hardware::
+Commands map either to ordinary protocol requests or to the ``emit``
+command used to inject events (scan / weight / device) for testing
+scenarios that would otherwise need real hardware.
 
+Вбрасывать события можно только в устройство, взятое себе командой
+``attach``: служба проверяет владение и иначе отвечает ``not_attached``.
+В однократном режиме это значит, что `attach` и `emit` надо слать в одном
+сеансе — то есть из интерактивного режима::
+
+    python -m devices.cli attach scale
     python -m devices.cli scan WH1281187100421
     python -m devices.cli weight 22.4 --stable
     python -m devices.cli device printer offline --reason unplugged
@@ -29,7 +35,7 @@ from typing import Any
 from PyQt6.QtCore import QCoreApplication, QObject, pyqtSignal
 from PyQt6.QtNetwork import QLocalSocket
 
-from .config import load_config
+from .config import get_default_config
 from .protocol import parse_frame
 
 #: Default pipe name (kept in sync with the config default).
@@ -61,9 +67,12 @@ class DebugClient(QObject):
     # --- Connection ------------------------------------------------------
 
     def connect(self, timeout_ms: int = 3000) -> bool:
-        """Connect to the named pipe. Returns ``True`` on success."""
-        full_pipe = rf"\\.\pipe\{self._pipe_name}"
-        self._socket.connectToServer(full_pipe)
+        """Connect to the named pipe. Returns ``True`` on success.
+
+        Имя передаём короткое: префикс ``\\\\.\\pipe\\`` Qt подставляет сам, а с
+        полным путём клиент сервера не находит (см. ``DeviceServer.start``).
+        """
+        self._socket.connectToServer(self._pipe_name)
         return self._socket.waitForConnected(timeout_ms)
 
     def is_connected(self) -> bool:
@@ -138,6 +147,10 @@ def build_request(cmd_line: str) -> tuple[dict[str, Any] | None, str]:
         return {"id": _next_id(), "cmd": "unsubscribe", "events": rest}, ""
     if head == "shutdown":
         return {"id": _next_id(), "cmd": "shutdown"}, ""
+
+    if head in ("attach", "detach"):
+        devices = rest or ["scanner", "scale", "printer"]
+        return {"id": _next_id(), "cmd": head, "devices": devices}, ""
 
     if head == "scan":
         if not rest:
@@ -233,9 +246,9 @@ def _next_id() -> int:
 
 
 def _emit(payload: dict[str, Any]) -> dict[str, Any]:
-    """Wrap *payload* in a ``debug_emit`` request."""
+    """Wrap *payload* in an ``emit`` request."""
     payload["id"] = _next_id()
-    payload["cmd"] = "debug_emit"
+    payload["cmd"] = "emit"
     return payload
 
 
@@ -308,7 +321,9 @@ def run_interactive(pipe_name: str) -> int:
     prompter.line_ready.connect(lambda line: _handle_line(client, line))
     prompter.start()
 
-    print("connected; type a command (help: scan/weight/device/printer/scale, quit to exit)")
+    print("connected; commands: attach/detach, scan, weight, device, printer, scale, "
+          "subscribe, devices; quit to exit")
+    print("вбросить событие можно только в устройство, взятое командой attach")
     return app.exec()
 
 
@@ -366,7 +381,7 @@ def main() -> None:
     pipe_name = args.pipe
     if pipe_name is None:
         try:
-            pipe_name = load_config().get("pipe", {}).get("name", DEFAULT_PIPE_NAME)
+            pipe_name = get_default_config().get("pipe", {}).get("name", DEFAULT_PIPE_NAME)
         except Exception:  # noqa: BLE001
             pipe_name = DEFAULT_PIPE_NAME
 

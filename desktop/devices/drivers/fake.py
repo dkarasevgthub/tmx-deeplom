@@ -64,16 +64,23 @@ class FakeScale(DeviceDriver):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(device_id="scale", auto_reconnect=False, parent=parent)
+        self._last: tuple[float, str, bool] | None = None
 
     def _do_open(self) -> None:
         self._set_state(STATE_ONLINE, "fake")
 
     def _do_close(self) -> None:
+        self._last = None
         self._set_state(STATE_OFFLINE, "closed")
+
+    def last_reading(self) -> tuple[float, str, bool] | None:
+        """Последнее показание — как у настоящего драйвера, для новых подписчиков."""
+        return self._last
 
     def emit_weight(self, value: float, unit: str = "g", stable: bool = True) -> None:
         """Emit a fake weight reading."""
         logger.info("FakeScale: value=%.2f %s stable=%s", value, unit, stable)
+        self._last = (value, unit, stable)
         self.weight.emit(value, unit, stable)
 
 

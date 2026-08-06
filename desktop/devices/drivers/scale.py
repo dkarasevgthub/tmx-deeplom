@@ -210,6 +210,16 @@ class ScaleDriver(DeviceDriver):
         stable = parts[1].upper() == "S"
         self._emit_if_changed(value, self._unit, stable)
 
+    def last_reading(self) -> tuple[float, str, bool] | None:
+        """Последнее показание или ``None``, если весы ещё ничего не дали.
+
+        Нужно новому подписчику: события идут только при изменении, и на
+        неподвижных весах он иначе не услышал бы ничего.
+        """
+        if self._last_value is None:
+            return None
+        return self._last_value, self._unit, self._last_stable
+
     def _emit_if_changed(self, value: float, unit: str, stable: bool) -> None:
         """Emit :pyattr:`weight` only when value or flag changed."""
         if value == self._last_value and stable == self._last_stable:
