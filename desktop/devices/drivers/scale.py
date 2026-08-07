@@ -4,25 +4,9 @@ The ESP32 streams lines of the form ``"59.23 S\\n"`` / ``"58.68 U\\n"``
 at roughly 10 Hz: a floating-point weight, a space, and a stability flag
 (``S`` = stable, ``U`` = unstable), terminated by ``\\n``.
 
-The driver reads these lines asynchronously via ``QSerialPort`` signals
-and emits a :pyattr:`weight` signal whenever the value or the stability
-flag changes (the application only sees these through a ``weight``
-event while subscribed).
-
-It also supports two control commands sent *to* the scale:
-
-* :meth:`tare` — send ``TARE\\n``, wait for ``OK``.
-* :meth:`calibrate` — send ``CALIB <weight>\\n``, wait for ``OK``.
-
-And a blocking-style read of one stable weight:
-
-* :meth:`read_stable` — returns immediately if the latest reading is
-  stable, otherwise waits (within the Qt event loop) for the next
-  stable reading, raising :class:`ScaleTimeoutError` on timeout.
-
-Both streaming and request/response scale firmwares are supported: in
-polling mode the scale simply answers each line; outwardly the events
-look the same.
+If no port is configured or the port is not found, the driver enters
+a search state: every few seconds it rescans available COM ports and
+attempts to open the first suitable one.
 """
 
 from __future__ import annotations
@@ -32,8 +16,10 @@ import logging
 from PyQt6.QtCore import QEventLoop, QObject, QTimer, pyqtSignal
 from PyQt6.QtSerialPort import QSerialPort
 
+from ..config import list_ports
 from ..protocol import STATE_ERROR, STATE_OFFLINE, STATE_ONLINE
 from .base import DeviceDriver
+from .scanner import _claimed_ports
 
 logger = logging.getLogger(__name__)
 
@@ -72,14 +58,10 @@ class ScaleDriver(DeviceDriver):
         command_tare: str = DEFAULT_TARE_CMD,
         command_calib: str = DEFAULT_CALIB_CMD,
         unit: str = "g",
-        fake: bool = False,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(device_id="scale", parent=parent)
         self._port_name: str = port or ""
-        # Эмуляция, как у сканера: без порта весы остаются online и принимают
-        # показания снаружи (debug_emit weight) — так их гоняют без железа.
-        self._fake: bool = fake or not bool(self._port_name)
         self._baud: int = baud
         self._step_g: float = step_g
         self._command_tare: str = command_tare
@@ -100,12 +82,39 @@ class ScaleDriver(DeviceDriver):
 
     def _do_open(self) -> None:
         """Open the serial port and start reading weight data."""
-        if self._fake:
-            logger.info("ScaleDriver: emulation mode (no real port)")
-            self._set_state(STATE_ONLINE, "emulation")
-            return
-        logger.info("ScaleDriver: opening %s @ %d baud", self._port_name, self._baud)
+        if not self._port_name or not self._port_name.upper().startswith("COM"):
+            found_port = self._find_port()
+            if found_port:
+                logger.info("ScaleDriver: found port %s", found_port)
+                self._port_name = found_port
+            else:
+                logger.debug("ScaleDriver: no port found, searching...")
+                self._set_state(STATE_OFFLINE, "searching")
+                return
 
+        logger.info("ScaleDriver: opening %s @ %d baud", self._port_name, self._baud)
+        self._open_serial()
+
+    def _find_port(self) -> str:
+        """Find a suitable COM port. If a hint is set, match it."""
+        hint = self._port_name.lower()
+        for p in list_ports():
+            parts = p.split(" ", 1)
+            device = parts[0]
+            description = parts[1] if len(parts) > 1 else ""
+
+            if device in _claimed_ports:
+                continue
+            if hint and hint in description.lower():
+                _claimed_ports.add(device)
+                return device
+            if not hint:
+                _claimed_ports.add(device)
+                return device
+        return ""
+
+    def _open_serial(self) -> None:
+        """Create and open the underlying ``QSerialPort``."""
         self._close_serial()
         serial = self._serial
         serial.setPortName(self._port_name)
@@ -115,11 +124,13 @@ class ScaleDriver(DeviceDriver):
         serial.setStopBits(QSerialPort.StopBits.OneStop)
         serial.setFlowControl(QSerialPort.FlowControl.NoFlowControl)
 
-        # ReadWrite: we also need to send tare/calibrate commands.
         if not serial.open(QSerialPort.OpenModeFlag.ReadWrite):
             error = serial.errorString()
             logger.error("ScaleDriver: failed to open %s – %s", self._port_name, error)
-            self._set_state(STATE_ERROR, error)
+            _claimed_ports.discard(self._port_name)
+            # Уходим в поиск, а не в ошибку
+            self._port_name = ""
+            self._set_state(STATE_OFFLINE, "searching")
             return
 
         serial.readyRead.connect(self._on_ready_read)
@@ -146,6 +157,7 @@ class ScaleDriver(DeviceDriver):
             pass
         if serial.isOpen():
             serial.close()
+        _claimed_ports.discard(self._port_name)
 
     # --- Slots -----------------------------------------------------------
 
@@ -174,17 +186,14 @@ class ScaleDriver(DeviceDriver):
             self._abort_pending_ack()
             if self._serial.isOpen():
                 self._serial.close()
-            self._set_state(STATE_OFFLINE, f"port error: {msg}")
-
+            _claimed_ports.discard(self._port_name)
+            # Уходим в поиск, а не в ошибку
+            self._port_name = ""
+            self._set_state(STATE_OFFLINE, "searching")
     # --- Parsing ---------------------------------------------------------
 
     def _handle_line(self, line: str) -> None:
-        """Parse one line from the scale.
-
-        A bare ``OK`` is an acknowledgement for a tare/calibrate command
-        and resolves any pending handshake. Otherwise the line is
-        ``"<value> <S|U>"``.
-        """
+        """Parse one line from the scale."""
         if line.upper() == "OK":
             self._resolve_pending_ack()
             return
@@ -200,6 +209,16 @@ class ScaleDriver(DeviceDriver):
             return
         stable = parts[1].upper() == "S"
         self._emit_if_changed(value, self._unit, stable)
+
+    def last_reading(self) -> tuple[float, str, bool] | None:
+        """Последнее показание или ``None``, если весы ещё ничего не дали.
+
+        Нужно новому подписчику: события идут только при изменении, и на
+        неподвижных весах он иначе не услышал бы ничего.
+        """
+        if self._last_value is None:
+            return None
+        return self._last_value, self._unit, self._last_stable
 
     def _emit_if_changed(self, value: float, unit: str, stable: bool) -> None:
         """Emit :pyattr:`weight` only when value or flag changed."""
@@ -217,9 +236,6 @@ class ScaleDriver(DeviceDriver):
         if not self.is_open():
             logger.warning("ScaleDriver: cannot send %r, port not open", command)
             return False
-        if self._fake:
-            logger.info("ScaleDriver: emulation, command %r accepted", command)
-            return True
         try:
             payload = (command + "\n").encode("utf-8")
             written = self._serial.write(payload)
@@ -230,10 +246,7 @@ class ScaleDriver(DeviceDriver):
             return False
 
     def _wait_for_ack(self, timeout_ms: int = ACK_TIMEOUT_MS) -> bool:
-        """Block (inside the Qt event loop) until ``OK`` or timeout.
-
-        Returns ``True`` on acknowledgement, ``False`` on timeout.
-        """
+        """Block (inside the Qt event loop) until ``OK`` or timeout."""
         if not self.is_open():
             return False
         loop = QEventLoop()
@@ -242,7 +255,6 @@ class ScaleDriver(DeviceDriver):
         loop.exec()
         self._ack_timer.stop()
         self._pending_ack = None
-        # Distinguish timeout from ack via a flag set on the loop.
         return loop.property("ack_ok") is True
 
     def _resolve_pending_ack(self) -> None:
@@ -275,9 +287,6 @@ class ScaleDriver(DeviceDriver):
         logger.info("ScaleDriver: tare")
         if not self._send_command(self._command_tare):
             return False
-        if self._fake:
-            self._emit_if_changed(0.0, self._unit, True)   # обнулили — 0 и стабильно
-            return True
         return self._wait_for_ack(timeout_ms)
 
     def calibrate(self, weight: float, timeout_ms: int = ACK_TIMEOUT_MS) -> bool:
@@ -289,13 +298,7 @@ class ScaleDriver(DeviceDriver):
         return self._wait_for_ack(timeout_ms)
 
     def read_stable(self, timeout_ms: int = 3000) -> float:
-        """Return a stable weight reading.
-
-        If the latest reading is already stable it is returned at once.
-        Otherwise the method waits (within the Qt event loop) for the
-        next stable reading. Raises :class:`ScaleTimeoutError` if none
-        arrives within *timeout_ms*.
-        """
+        """Return a stable weight reading."""
         if self._last_value is not None and self._last_stable:
             return self._last_value
 
@@ -326,7 +329,7 @@ class ScaleDriver(DeviceDriver):
             raise ScaleTimeoutError("no stable reading within timeout")
         return float(value)
 
-    # --- Public emulation API --------------------------------------------
+    # --- Public emulation API (kept for FakeScale) -----------------------
 
     def emit_weight(
         self, value: float, unit: str | None = None, stable: bool = True

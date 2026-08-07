@@ -29,6 +29,7 @@ from typing import Any
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from ..config import list_printers
 from ..protocol import (
     JOB_DONE,
     JOB_FAILED,
@@ -92,22 +93,19 @@ class PrinterDriver(DeviceDriver):
         stub: bool | None = None,
         parent: QObject | None = None,
     ) -> None:
-        super().__init__(device_id="printer", auto_reconnect=False, parent=parent)
+        # Включаем авто-переподключение, чтобы драйвер периодически искал принтер
+        super().__init__(device_id="printer", auto_reconnect=True, parent=parent)
         self._printer_name: str = name or ""
         self._encoding: str = encoding
         self._output_file: str = output_file or ""
 
         # ``stub`` forces the file-writing path. By default we stub when
-        # an output file is configured OR when no printer name is given.
-        self._stub: bool = (
-            stub if stub is not None else (bool(self._output_file) or not self._printer_name)
-        )
+        # an output file is configured.
+        self._stub: bool = stub if stub is not None else bool(self._output_file)
         self._retry_delays: list[int] = (
             list(retry_delays) if retry_delays is not None else list(DEFAULT_RETRY_DELAYS)
         )
 
-        # реентерабельный: submit() держит лок и внутри зовёт _next_job_id(),
-        # который берёт его повторно — с обычным Lock это самоблокировка
         self._lock = threading.RLock()
         self._jobs: list[Job] = []
         self._by_key: dict[str, Job] = {}
@@ -120,24 +118,40 @@ class PrinterDriver(DeviceDriver):
     # --- Lifecycle -------------------------------------------------------
 
     def _do_open(self) -> None:
-        """Mark the printer online and start the worker thread."""
-        logger.info(
-            "PrinterDriver: opening %s (stub=%s)", self._printer_name or "<stub>", self._stub
-        )
-        # A stub with output_file or a configured printer name means online.
-        if self._stub or self._printer_name:
+        """Open the printer or search for one if not configured."""
+        # Если задан output_file, мы работаем как stub (всегда online)
+        if self._stub:
+            logger.info("PrinterDriver: opening in stub mode (output_file=%s)", self._output_file)
             self._start_worker()
             self._set_state(STATE_ONLINE, "ready")
-        else:
-            self._set_state(STATE_OFFLINE, "no printer configured")
+            return
+
+        # Если принтер не задан в конфиге, пытаемся найти первый попавшийся
+        if not self._printer_name:
+            printers = list_printers()
+            if printers:
+                self._printer_name = printers[0]
+                logger.info("PrinterDriver: auto-found printer %s", self._printer_name)
+            else:
+                logger.debug("PrinterDriver: no printer found, searching...")
+                self._set_state(STATE_OFFLINE, "searching")
+                return
+
+        # Проверяем, доступен ли заданный (или найденный) принтер в системе
+        printers = list_printers()
+        if self._printer_name not in printers:
+            logger.warning("PrinterDriver: printer '%s' not found in system", self._printer_name)
+            # Сбрасываем имя, чтобы в следующий раз снова сработал автопоиск
+            self._printer_name = ""
+            self._set_state(STATE_OFFLINE, "searching")
+            return
+
+        logger.info("PrinterDriver: opening %s", self._printer_name)
+        self._start_worker()
+        self._set_state(STATE_ONLINE, "ready")
 
     def _do_close(self) -> None:
-        """Stop the worker, finishing the in-flight job if possible.
-
-        Any jobs still queued are logged (per spec) but not silently
-        dropped from memory. This never blocks longer than the join
-        timeout.
-        """
+        """Stop the worker, finishing the in-flight job if possible."""
         self._stop_worker()
 
         with self._lock:
@@ -211,15 +225,12 @@ class PrinterDriver(DeviceDriver):
                     delay = self._retry_delays[attempt]
                     job.retry_count = attempt + 1
                     job.error_message = str(exc)
-                    # Inform the app a retry is pending.
                     self._set_job_state(job, JOB_QUEUED, str(exc))
-                    # Interruptible sleep so close() can stop us.
                     if self._stop_event.wait(delay):
                         return
                     self._set_job_state(job, JOB_PRINTING, "")
                     attempt += 1
                     continue
-                # Exhausted retries.
                 job.retry_count = attempt + 1
                 job.error_message = str(exc)
                 self._set_job_state(job, JOB_FAILED, str(exc))
@@ -227,10 +238,7 @@ class PrinterDriver(DeviceDriver):
                 return
 
     def _do_print(self, job: Job) -> None:
-        """Send one job's payload to the chosen transport.
-
-        Raises on failure so the caller can schedule a retry.
-        """
+        """Send one job's payload to the chosen transport."""
         if self._stub:
             self._print_to_file(job)
         else:
@@ -242,7 +250,6 @@ class PrinterDriver(DeviceDriver):
         os.makedirs(tmp_dir, exist_ok=True)
         path = os.path.join(tmp_dir, f"print_{job.job_id}.{job.format}")
         data = job.payload.encode(self._encoding, errors="replace")
-        # Honour copies by writing the payload that many times.
         with open(path, "wb") as fh:
             fh.writelines(data for _ in range(max(1, job.copies)))
         logger.debug("PrinterDriver: wrote job %s -> %s", job.job_id, path)
@@ -296,12 +303,7 @@ class PrinterDriver(DeviceDriver):
     def submit(
         self, key: str, fmt: str, payload: str, copies: int = 1
     ) -> tuple[str, str]:
-        """Queue a print job.
-
-        Idempotent: a repeated call with the same *key* returns the
-        existing job's id and current state. Returns
-        ``(job_id, state)``.
-        """
+        """Queue a print job."""
         key = key or ""
         with self._lock:
             existing = self._by_key.get(key) if key else None

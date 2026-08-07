@@ -15,8 +15,9 @@ screens use.
 from __future__ import annotations
 
 import json
+from collections import deque
 
-from PyQt6.QtCore import QEventLoop, QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QDateTime, QObject, QTimer, pyqtSignal
 from PyQt6.QtNetwork import QLocalSocket
 
 # ── protocol (mirrors devices/protocol.py) ─────────────────────────
@@ -32,11 +33,14 @@ STATE_LABELS = {OFFLINE: "Недоступен", ONLINE: "Доступен", ERR
 DEVICES = [("scanner", "Сканер"), ("printer", "Принтер"), ("scale", "Весы")]
 
 _RECONNECT_MS = 5000        # как часто пробовать поднять соединение заново
-_REQUEST_TIMEOUT_MS = 5000  # ответ службы ждём не дольше этого
-#: Весы отдают показания десять раз в секунду: если за это время вес не устоялся,
-#: коробку лучше отдать оператору, чем держать экран.
-_SCALE_TIMEOUT_MS = 1500
 _SCAN_DEDUP_MS = 500        # сканеры повторяют код при удержании кнопки
+#: Глубина журнала обмена. Весы дают десять кадров в секунду, так что окно
+#: получается коротким по времени — но диагностируют по свежим событиям.
+LOG_LIMIT = 500
+
+OUT = "→"       # запрос от приложения
+IN = "←"        # ответ или событие от службы
+NOTE = "·"      # отметка самого клиента: соединение, обрыв
 
 
 class _Bus(QObject):
@@ -56,22 +60,23 @@ class DeviceClient(QObject):
 
     scanned = pyqtSignal(str)            # штрихкод
     weight_read = pyqtSignal(float, bool)  # килограммы, устойчиво ли
+    logged = pyqtSignal(dict)            # новая запись журнала обмена
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._socket = QLocalSocket(self)
         self._buffer = bytearray()
         self._next_id = 0
-        self._pending = {}               # id -> ответ, пока его ждёт read_weight
         self._states = {key: OFFLINE for key, _ in DEVICES}
         self._connected = False
         self._last_scan = ("", 0)
-        self._last_weight = None         # последнее показание из потока
+        self._want_weight = False        # нужен ли поток веса: см. _on_connected
         self._enabled = False
+        self._log = deque(maxlen=LOG_LIMIT)
 
         self._socket.connected.connect(self._on_connected)
         self._socket.disconnected.connect(self._on_disconnected)
-        self._socket.errorOccurred.connect(lambda _e: self._on_disconnected())
+        self._socket.errorOccurred.connect(self._on_socket_error)
         self._socket.readyRead.connect(self._on_ready_read)
 
         self._retry = QTimer(self)
@@ -107,10 +112,6 @@ class DeviceClient(QObject):
         self._set_all(OFFLINE)
 
     @property
-    def last_weight(self):
-        return self._last_weight
-
-    @property
     def connected(self) -> bool:
         return self._connected
 
@@ -126,14 +127,37 @@ class DeviceClient(QObject):
     def _on_connected(self):
         self._connected = True
         self._buffer.clear()
+        self._note("соединение со службой установлено")
         self._send("hello", protocol=PROTOCOL_VERSION, client="prozapas 1.0")
         self._send("devices")
-        # вес приходит только по подписке, чтобы служба не слала его вхолостую
-        self._send("subscribe", events=["scan", "device", "job"])
+        # Подписка — это состояние клиента, а не разовая команда: объявляем весь
+        # набор целиком, иначе после перезапуска службы поток веса не вернётся, а
+        # экран продолжит показывать последнее значение как живое.
+        self._send("subscribe", events=self._subscriptions())
+
+    def _subscriptions(self) -> list[str]:
+        """Полный набор событий, который нужен приложению прямо сейчас."""
+        events = ["scan", "device", "job"]
+        if self._want_weight:
+            events.append("weight")
+        return events
+
+    def _on_socket_error(self, error):
+        """Ошибка сокета — ещё не обрыв связи.
+
+        Истёкшее ожидание отдаёт `SocketTimeoutError`, хотя канал жив. Считать
+        это обрывом нельзя: приложение уводило все устройства в offline после
+        первой же печати, и следующая кнопка молча ничего не отправляла.
+        """
+        if self._socket.state() == QLocalSocket.LocalSocketState.ConnectedState:
+            self._note(f"ошибка сокета: {error.name} (связь сохранена)")
+            return
+        self._on_disconnected()
 
     def _on_disconnected(self):
         if not self._connected and all(v == OFFLINE for v in self._states.values()):
             return
+        self._note("соединение со службой потеряно")
         self._connected = False
         self._set_all(OFFLINE)
 
@@ -143,12 +167,40 @@ class DeviceClient(QObject):
         if changed:
             bus.changed.emit()
 
+    # ── журнал обмена ─────────────────────────────────────────
+    def _record(self, direction: str, frame: dict, kind: str = ""):
+        """Положить кадр в журнал и разбудить открытое окно логов.
+
+        Журнал нужен при подключении настоящего железа: по нему видно, шлёт ли
+        устройство хоть что-нибудь и в каком виде, — иначе диагностировать
+        молчащий COM-порт из интерфейса нечем.
+        """
+        entry = {
+            "at": QDateTime.currentDateTime().toString("HH:mm:ss.zzz"),
+            "dir": direction,
+            "kind": kind or frame.get("event") or frame.get("cmd") or "",
+            "text": json.dumps(frame, ensure_ascii=False),
+        }
+        self._log.append(entry)
+        self.logged.emit(entry)
+
+    def _note(self, text: str):
+        """Отметка о состоянии соединения — её в канале нет, а понимать надо."""
+        self._record(NOTE, {"note": text}, kind="note")
+
+    def log_entries(self) -> list[dict]:
+        return list(self._log)
+
+    def clear_log(self):
+        self._log.clear()
+
     # ── отправка и разбор ─────────────────────────────────────
     def _send(self, cmd, **fields) -> int:
         self._next_id += 1
         frame = dict(id=self._next_id, cmd=cmd, **fields)
         self._socket.write((json.dumps(frame, ensure_ascii=False) + "\n").encode("utf-8"))
         self._socket.flush()
+        self._record(OUT, frame)
         return self._next_id
 
     def _on_ready_read(self):
@@ -166,12 +218,9 @@ class DeviceClient(QObject):
                 self._handle(frame)
 
     def _handle(self, frame: dict):
+        self._record(IN, frame)
         if "event" in frame:
             self._handle_event(frame)
-            return
-        req_id = frame.get("id")
-        if req_id in self._pending:
-            self._pending[req_id] = frame
             return
         devices = frame.get("devices")
         if isinstance(devices, dict):        # ответ на `devices`
@@ -198,62 +247,19 @@ class DeviceClient(QObject):
                     self._states[key] = state
                     bus.changed.emit()
         elif event == "weight":
-            kg = _to_kg(frame)
-            self._last_weight = kg
-            self.weight_read.emit(kg, bool(frame.get("stable")))
+            self.weight_read.emit(_to_kg(frame), bool(frame.get("stable")))
 
-    # ── команды, требующие ответа ─────────────────────────────
-    def _request(self, cmd, wait_ms=_REQUEST_TIMEOUT_MS, **fields):
-        """Отправить команду и дождаться ответа, не морозя интерфейс.
+    def print_label(self, key: str, payload: str, fmt: str = "zpl", copies: int = 1) -> bool:
+        """Отправить этикетку в печать. Ответа не ждём.
 
-        Локальный цикл событий продолжает крутиться, поэтому окно перерисовы-
-        вается; None означает, что служба не ответила за отведённое время.
+        Раньше здесь крутился вложенный цикл событий: он ждал номер задания,
+        который экрану не нужен, а по дороге ловил таймаут сокета и обрушивал
+        связь. Итог печати всё равно приходит событием `job`.
         """
         if not self._connected:
-            return None
-        req_id = self._send(cmd, **fields)
-        self._pending[req_id] = None
-        loop = QEventLoop()
-        timer = QTimer()
-        timer.setSingleShot(True)
-        timer.timeout.connect(loop.quit)
-        timer.start(wait_ms)
-
-        def _pump():
-            """Читаем сокет сами: вложенный readyRead может и не прийти."""
-            if self._socket.bytesAvailable() or self._socket.waitForReadyRead(5):
-                self._on_ready_read()
-            if self._pending.get(req_id) is not None:
-                loop.quit()
-
-        poll = QTimer()
-        poll.setInterval(10)
-        poll.timeout.connect(_pump)
-        poll.start()
-        loop.exec()
-        poll.stop()
-        timer.stop()
-        return self._pending.pop(req_id, None)
-
-    def read_weight(self, scale_timeout_ms=_SCALE_TIMEOUT_MS):
-        """Устойчивый вес в килограммах или None, если весы не ответили.
-
-        Своего ответа ждём чуть дольше, чем сами весы: иначе клиент сдастся
-        раньше службы и та ответит уже некому.
-        """
-        # своего ответа ждём дольше, чем сами весы: иначе сдадимся раньше службы
-        reply = self._request("scale.read", wait_ms=scale_timeout_ms + 500,
-                              stable=True, timeout_ms=scale_timeout_ms)
-        if not reply or not reply.get("ok"):
-            return None
-        return _to_kg(reply)
-
-    def print_label(self, key: str, payload: str, fmt: str = "zpl", copies: int = 1):
-        """Поставить этикетку в очередь печати. Возвращает id задания или None."""
-        reply = self._request("print", key=key, format=fmt, payload=payload, copies=copies)
-        if not reply or not reply.get("ok"):
-            return None
-        return reply.get("job")
+            return False
+        self._send("print", key=key, format=fmt, payload=payload, copies=copies)
+        return True
 
     def send_shutdown(self):
         """Команда службе завершиться — ответа не ждём, она сразу уходит."""
@@ -262,7 +268,12 @@ class DeviceClient(QObject):
             self._socket.waitForBytesWritten(400)
 
     def subscribe_weight(self, on: bool):
-        """Поток показаний весов нужен только на экранах, где он виден."""
+        """Поток показаний весов нужен только на экранах, где он виден.
+
+        Желаемое состояние запоминается: соединение может подняться позже, а
+        служба — перезапуститься, и тогда подписку восстановит `_on_connected`.
+        """
+        self._want_weight = on
         if self._connected:
             self._send("subscribe" if on else "unsubscribe", events=["weight"])
 
@@ -329,14 +340,13 @@ def live_weight(on: bool) -> None:
     client.subscribe_weight(on)
 
 
-def read_weight(expected_kg: float | None = None):
-    """Вес коробки в килограммах или None, если весы не ответили."""
-    return client.read_weight()
+def log_entries() -> list[dict]:
+    """Журнал обмена со службой — для окна «Логи»."""
+    return client.log_entries()
 
 
-def last_live_weight():
-    """Последнее показание из потока — чем заполнить ручной ввод."""
-    return client.last_weight
+def clear_log() -> None:
+    client.clear_log()
 
 
 def print_label(key: str, payload: str, copies: int = 1):

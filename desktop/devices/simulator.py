@@ -5,9 +5,10 @@ Simulator GUI для ручного тестирования службы device
 
 import datetime
 import json
+import random
 import sys
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtNetwork import QLocalSocket
 from PyQt6.QtWidgets import (
     QApplication,
@@ -36,6 +37,9 @@ except ImportError:
 
 
 class SimulatorWindow(QWidget):
+    #: Сколько тактов груз «оседает», прежде чем весы объявят вес устойчивым.
+    STREAM_SETTLE_TICKS = 12          # ≈1.2 секунды при 10 Гц
+
     def __init__(self):
         super().__init__()
         self.socket = None
@@ -45,15 +49,25 @@ class SimulatorWindow(QWidget):
             "scale": None,
             "printer": None,
         }
+        # Отслеживание подключенных ролей
+        self.attached_devices = set()
+
+        # Поток показаний весов — настоящие весы шлют ~10 раз в секунду
+        self._settling = 0
+        self.stream_timer = QTimer(self)
+        self.stream_timer.setInterval(100)
+        self.stream_timer.timeout.connect(self._stream_tick)
+
         self.init_ui()
         self.setWindowTitle("Devices Service Simulator")
-        self.resize(900, 750)
+        self.resize(900, 850)
+        self._update_ui_states()
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
 
-        # Панель подключения
-        conn_group = QGroupBox("Подключение")
+        # --- 1. Панель подключения ---
+        conn_group = QGroupBox("Подключение к службе")
         conn_layout = QHBoxLayout()
         self.pipe_edit = QLineEdit("prozapas-devices")
         self.connect_btn = QPushButton("Подключиться")
@@ -69,127 +83,19 @@ class SimulatorWindow(QWidget):
         conn_group.setLayout(conn_layout)
         main_layout.addWidget(conn_group)
 
-        # Панель быстрых команд (эмуляция событий)
-        events_group = QGroupBox("Эмуляция событий")
-        events_layout = QGridLayout()
+        # --- 2. Панели управления устройствами ---
+        devices_container = QHBoxLayout()
+        devices_container.addWidget(self._build_scanner_panel())
+        devices_container.addWidget(self._build_scale_panel())
+        devices_container.addWidget(self._build_printer_panel())
+        main_layout.addLayout(devices_container)
 
-        # Сканирование
-        events_layout.addWidget(QLabel("Код скана:"), 0, 0)
-        self.scan_code_edit = QLineEdit()
-        events_layout.addWidget(self.scan_code_edit, 0, 1)
-        self.scan_btn = QPushButton("Сканировать")
-        events_layout.addWidget(self.scan_btn, 0, 2)
-
-        # Вес
-        events_layout.addWidget(QLabel("Вес:"), 1, 0)
-        self.weight_edit = QLineEdit()
-        events_layout.addWidget(self.weight_edit, 1, 1)
-        self.stable_cb = QCheckBox("Стабильно")
-        # без стабильного показания scale.read у службы уходит в таймаут,
-        # а приложение просит ввести вес руками — для проверки это не то
-        self.stable_cb.setChecked(True)
-        events_layout.addWidget(self.stable_cb, 1, 2)
-        self.weight_btn = QPushButton("Взвесить")
-        events_layout.addWidget(self.weight_btn, 1, 3)
-
-        # Состояние устройства
-        events_layout.addWidget(QLabel("Устройство:"), 2, 0)
-        self.device_combo = QComboBox()
-        self.device_combo.addItems(["Сканер", "Весы", "Принтер"])
-        events_layout.addWidget(self.device_combo, 2, 1)
-
-        events_layout.addWidget(QLabel("Состояние:"), 2, 2)
-        self.state_combo = QComboBox()
-        self.state_combo.addItems(["online", "offline", "error"])
-        events_layout.addWidget(self.state_combo, 2, 3)
-
-        events_layout.addWidget(QLabel("Причина:"), 3, 0)
-        self.reason_edit = QLineEdit()
-        events_layout.addWidget(self.reason_edit, 3, 1, 1, 2)
-        self.device_state_btn = QPushButton("Сменить состояние")
-        events_layout.addWidget(self.device_state_btn, 3, 3)
-
-        events_group.setLayout(events_layout)
-        main_layout.addWidget(events_group)
-
-        # Панель команд протокола
-        proto_group = QGroupBox("Команды протокола")
-        proto_layout = QHBoxLayout()
-        self.hello_btn = QPushButton("Hello")
-        self.devices_btn = QPushButton("Devices")
-        self.subscribe_btn = QPushButton("Подписаться на все")
-        self.unsubscribe_btn = QPushButton("Отписаться от всего")
-        proto_layout.addWidget(self.hello_btn)
-        proto_layout.addWidget(self.devices_btn)
-        proto_layout.addWidget(self.subscribe_btn)
-        proto_layout.addWidget(self.unsubscribe_btn)
-        proto_layout.addStretch()
-        proto_group.setLayout(proto_layout)
-        main_layout.addWidget(proto_group)
-
-        # Панель печати
-        print_group = QGroupBox("Печать")
-        print_layout = QGridLayout()
-
-        print_layout.addWidget(QLabel("Ключ:"), 0, 0)
-        self.print_key_edit = QLineEdit()
-        print_layout.addWidget(self.print_key_edit, 0, 1)
-
-        print_layout.addWidget(QLabel("Формат:"), 0, 2)
-        self.print_format_edit = QLineEdit("zpl")
-        print_layout.addWidget(self.print_format_edit, 0, 3)
-
-        print_layout.addWidget(QLabel("Payload:"), 1, 0)
-        self.print_payload_edit = QTextEdit()
-        self.print_payload_edit.setMaximumHeight(80)
-        print_layout.addWidget(self.print_payload_edit, 1, 1, 2, 3)
-
-        print_layout.addWidget(QLabel("Копии:"), 3, 0)
-        self.print_copies_edit = QLineEdit("1")
-        print_layout.addWidget(self.print_copies_edit, 3, 1)
-
-        self.print_btn = QPushButton("Напечатать")
-        print_layout.addWidget(self.print_btn, 3, 2)
-        self.print_queue_btn = QPushButton("Очередь")
-        print_layout.addWidget(self.print_queue_btn, 3, 3)
-
-        print_layout.addWidget(QLabel("Job ID:"), 4, 0)
-        self.job_id_edit = QLineEdit()
-        print_layout.addWidget(self.job_id_edit, 4, 1)
-        self.print_status_btn = QPushButton("Статус")
-        print_layout.addWidget(self.print_status_btn, 4, 2)
-        self.print_retry_btn = QPushButton("Повторить")
-        print_layout.addWidget(self.print_retry_btn, 4, 3)
-
-        print_group.setLayout(print_layout)
-        main_layout.addWidget(print_group)
-
-        # Панель весов
-        scale_group = QGroupBox("Весы")
-        scale_layout = QHBoxLayout()
-        self.scale_read_btn = QPushButton("Прочитать вес")
-        self.scale_tare_btn = QPushButton("Тара")
-        scale_layout.addWidget(self.scale_read_btn)
-        scale_layout.addWidget(self.scale_tare_btn)
-        scale_layout.addStretch()
-        scale_group.setLayout(scale_layout)
-        main_layout.addWidget(scale_group)
-
-        # Панель управления
-        ctrl_group = QGroupBox("Управление")
-        ctrl_layout = QHBoxLayout()
-        self.shutdown_btn = QPushButton("Shutdown")
-        ctrl_layout.addWidget(self.shutdown_btn)
-        ctrl_layout.addStretch()
-        ctrl_group.setLayout(ctrl_layout)
-        main_layout.addWidget(ctrl_group)
-
-        # Индикаторы состояний устройств
-        status_group = QGroupBox("Состояния устройств")
+        # --- 3. Индикаторы состояний устройств ---
+        status_group = QGroupBox("Состояния в службе")
         status_layout = QHBoxLayout()
-        self.ind_scan = QLabel("Сканер: неизвестно")
-        self.ind_weight = QLabel("Весы: неизвестно")
-        self.ind_printer = QLabel("Принтер: неизвестно")
+        self.ind_scan = QLabel("scanner: неизвестно")
+        self.ind_weight = QLabel("scale: неизвестно")
+        self.ind_printer = QLabel("printer: неизвестно")
         for lbl in (self.ind_scan, self.ind_weight, self.ind_printer):
             lbl.setFrameStyle(QFrame.Shape.Box | QFrame.Shadow.Sunken)
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -200,7 +106,32 @@ class SimulatorWindow(QWidget):
         status_group.setLayout(status_layout)
         main_layout.addWidget(status_group)
 
-        # Лог-окно
+        # --- 4. Панель команд протокола (отладка) ---
+        proto_group = QGroupBox("Команды протокола (Отладка)")
+        proto_layout = QHBoxLayout()
+        self.hello_btn = QPushButton("Hello")
+        self.devices_btn = QPushButton("Devices")
+        self.subscribe_btn = QPushButton("Подписаться на все")
+        self.shutdown_btn = QPushButton("Shutdown")
+        proto_layout.addWidget(self.hello_btn)
+        proto_layout.addWidget(self.devices_btn)
+        proto_layout.addWidget(self.subscribe_btn)
+        proto_layout.addWidget(self.shutdown_btn)
+        proto_layout.addStretch()
+        proto_group.setLayout(proto_layout)
+        main_layout.addWidget(proto_group)
+
+        # --- 5. Окно ZPL (входящие задания) ---
+        zpl_group = QGroupBox("Входящие задания печати (Print Jobs)")
+        zpl_layout = QVBoxLayout()
+        self.zpl_text = QTextEdit()
+        self.zpl_text.setFontFamily("monospace")
+        self.zpl_text.setReadOnly(True)
+        zpl_layout.addWidget(self.zpl_text)
+        zpl_group.setLayout(zpl_layout)
+        main_layout.addWidget(zpl_group)
+
+        # --- 6. Лог-окно ---
         log_group = QGroupBox("Лог")
         log_layout = QVBoxLayout()
         self.log_text = QTextEdit()
@@ -214,33 +145,174 @@ class SimulatorWindow(QWidget):
         self.connect_btn.clicked.connect(self.connect_to_server)
         self.disconnect_btn.clicked.connect(self.disconnect_from_server)
 
+        self.hello_btn.clicked.connect(lambda: self.send_request("hello", protocol=1, client="simulator"))
+        self.devices_btn.clicked.connect(lambda: self.send_request("devices"))
+        self.subscribe_btn.clicked.connect(lambda: self.send_request("subscribe", events=["scan", "weight", "device", "job", "print.job"]))
+        self.shutdown_btn.clicked.connect(lambda: self.send_request("shutdown"))
+
+    def _build_scanner_panel(self):
+        group = QGroupBox("Сканер")
+        layout = QVBoxLayout()
+
+        self.scan_sim_cb = QCheckBox("Включить эмуляцию (Attach)")
+        self.scan_sim_cb.toggled.connect(lambda c: self.handle_sim_toggled("scanner", c))
+        layout.addWidget(self.scan_sim_cb)
+
+        # Вброс скана
+        scan_row = QHBoxLayout()
+        self.scan_code_edit = QLineEdit()
+        self.scan_code_edit.setPlaceholderText("Штрихкод")
+        self.scan_btn = QPushButton("Сканировать")
         self.scan_btn.clicked.connect(self.send_scan)
+        scan_row.addWidget(self.scan_code_edit)
+        scan_row.addWidget(self.scan_btn)
+        layout.addLayout(scan_row)
+
+        # Смена состояния
+        state_row = QHBoxLayout()
+        self.scan_state_combo = QComboBox()
+        self.scan_state_combo.addItems(["online", "offline", "error"])
+        self.scan_state_btn = QPushButton("Сменить состояние")
+        self.scan_state_btn.clicked.connect(lambda: self.send_device_state("scanner", self.scan_state_combo.currentText()))
+        state_row.addWidget(self.scan_state_combo)
+        state_row.addWidget(self.scan_state_btn)
+        layout.addLayout(state_row)
+
+        layout.addStretch()
+        group.setLayout(layout)
+        return group
+
+    def _build_scale_panel(self):
+        group = QGroupBox("Весы")
+        layout = QVBoxLayout()
+
+        self.scale_sim_cb = QCheckBox("Включить эмуляцию (Attach)")
+        self.scale_sim_cb.toggled.connect(lambda c: self.handle_sim_toggled("scale", c))
+        layout.addWidget(self.scale_sim_cb)
+
+        # Вброс веса
+        weight_row = QHBoxLayout()
+        self.weight_edit = QLineEdit()
+        self.weight_edit.setPlaceholderText("Вес (г)")
+        self.stable_cb = QCheckBox("Стабильно")
+        self.stable_cb.setChecked(True)
+        self.weight_btn = QPushButton("Взвесить")
         self.weight_btn.clicked.connect(self.send_weight)
-        self.device_state_btn.clicked.connect(self.send_device_state)
+        weight_row.addWidget(self.weight_edit)
+        weight_row.addWidget(self.stable_cb)
+        weight_row.addWidget(self.weight_btn)
+        layout.addLayout(weight_row)
 
-        self.hello_btn.clicked.connect(self.send_hello)
-        self.devices_btn.clicked.connect(self.send_devices)
-        self.subscribe_btn.clicked.connect(self.send_subscribe)
-        self.unsubscribe_btn.clicked.connect(self.send_unsubscribe)
+        # Поток показаний: разовое «Взвесить» не воспроизводит живые весы —
+        # там цифра дрожит и лишь потом замирает. Без потока не проверить ни
+        # обновление панели, ни переход «неустойчиво → устойчиво».
+        stream_row = QHBoxLayout()
+        self.stream_cb = QCheckBox("Поток 10 Гц")
+        self.stream_cb.toggled.connect(self.toggle_stream)
+        self.settle_btn = QPushButton("Стабилизировать")
+        self.settle_btn.clicked.connect(self.settle_stream)
+        stream_row.addWidget(self.stream_cb)
+        stream_row.addWidget(self.settle_btn)
+        stream_row.addStretch(1)
+        layout.addLayout(stream_row)
 
+        # Смена состояния
+        state_row = QHBoxLayout()
+        self.scale_state_combo = QComboBox()
+        self.scale_state_combo.addItems(["online", "offline", "error"])
+        self.scale_state_btn = QPushButton("Сменить состояние")
+        self.scale_state_btn.clicked.connect(lambda: self.send_device_state("scale", self.scale_state_combo.currentText()))
+        state_row.addWidget(self.scale_state_combo)
+        state_row.addWidget(self.scale_state_btn)
+        layout.addLayout(state_row)
+
+        # Команды весов
+        cmd_row = QHBoxLayout()
+        self.scale_read_btn = QPushButton("Прочитать вес")
+        self.scale_tare_btn = QPushButton("Тара")
+        self.scale_read_btn.clicked.connect(lambda: self.send_request("scale.read", stable=True, timeout_ms=5000))
+        self.scale_tare_btn.clicked.connect(lambda: self.send_request("scale.tare"))
+        cmd_row.addWidget(self.scale_read_btn)
+        cmd_row.addWidget(self.scale_tare_btn)
+        layout.addLayout(cmd_row)
+
+        layout.addStretch()
+        group.setLayout(layout)
+        return group
+
+    def _build_printer_panel(self):
+        group = QGroupBox("Принтер")
+        layout = QVBoxLayout()
+
+        self.printer_sim_cb = QCheckBox("Включить эмуляцию (Attach)")
+        self.printer_sim_cb.toggled.connect(lambda c: self.handle_sim_toggled("printer", c))
+        layout.addWidget(self.printer_sim_cb)
+
+        # Смена состояния
+        state_row = QHBoxLayout()
+        self.printer_state_combo = QComboBox()
+        self.printer_state_combo.addItems(["online", "offline", "error"])
+        self.printer_state_btn = QPushButton("Сменить состояние")
+        self.printer_state_btn.clicked.connect(lambda: self.send_device_state("printer", self.printer_state_combo.currentText()))
+        state_row.addWidget(self.printer_state_combo)
+        state_row.addWidget(self.printer_state_btn)
+        layout.addLayout(state_row)
+
+        # Команды печати (отладка отправки)
+        layout.addWidget(QLabel("Отправка тестовой печати:"))
+        print_row = QHBoxLayout()
+        self.print_key_edit = QLineEdit("test-box")
+        self.print_btn = QPushButton("Напечатать")
         self.print_btn.clicked.connect(self.send_print)
-        self.print_queue_btn.clicked.connect(self.send_print_queue)
-        self.print_status_btn.clicked.connect(self.send_print_status)
-        self.print_retry_btn.clicked.connect(self.send_print_retry)
+        print_row.addWidget(self.print_key_edit)
+        print_row.addWidget(self.print_btn)
+        layout.addLayout(print_row)
 
-        self.scale_read_btn.clicked.connect(self.send_scale_read)
-        self.scale_tare_btn.clicked.connect(self.send_scale_tare)
+        layout.addStretch()
+        group.setLayout(layout)
+        return group
 
-        self.shutdown_btn.clicked.connect(self.send_shutdown)
+    def _update_ui_states(self):
+        """Блокировка кнопок в зависимости от статуса attach."""
+        is_connected = self.socket is not None and self.socket.state() == QLocalSocket.LocalSocketState.ConnectedState
+
+        widgets = [
+            (self.scan_sim_cb, self.scan_code_edit, self.scan_btn, self.scan_state_combo, self.scan_state_btn),
+            (self.scale_sim_cb, self.weight_edit, self.stable_cb, self.weight_btn,
+             self.stream_cb, self.settle_btn,
+             self.scale_state_combo, self.scale_state_btn, self.scale_read_btn, self.scale_tare_btn),
+            (self.printer_sim_cb, self.printer_state_combo, self.printer_state_btn, self.print_key_edit, self.print_btn)
+        ]
+
+        for group in widgets:
+            main_cb = group[0]
+            others = group[1:]
+
+            # Блокируем всё, если не подключены к серверу
+            for w in group:
+                w.setEnabled(is_connected)
+
+            # Если подключены, блокируем доп. кнопки, если не стоит галочка attach
+            if is_connected:
+                for w in others:
+                    w.setEnabled(main_cb.isChecked())
+
+    # ---------- Логика Attach/Detach ----------
+    def handle_sim_toggled(self, device, checked):
+        if checked:
+            self.send_request("attach", devices=[device])
+        else:
+            if device == "scale":
+                self.stream_cb.setChecked(False)   # отдали весы — поток ни к чему
+            self.send_request("detach", devices=[device])
+        self._update_ui_states()
 
     # ---------- Сокет и отправка ----------
     def connect_to_server(self):
         if self.socket and self.socket.state() == QLocalSocket.LocalSocketState.ConnectedState:
             self.log("Уже подключено", "info")
             return
-        pipe_name = self.pipe_edit.text().strip()
-        if not pipe_name:
-            pipe_name = "prozapas-devices"
+        pipe_name = self.pipe_edit.text().strip() or "prozapas-devices"
         self.socket = QLocalSocket()
         self.socket.connected.connect(self.on_connected)
         self.socket.disconnected.connect(self.on_disconnected)
@@ -252,33 +324,38 @@ class SimulatorWindow(QWidget):
 
     def disconnect_from_server(self):
         if self.socket:
+            # Сбрасываем галочки при отключении
+            self.scan_sim_cb.setChecked(False)
+            self.scale_sim_cb.setChecked(False)
+            self.printer_sim_cb.setChecked(False)
             self.socket.disconnectFromServer()
         else:
             self.status_label.setText("Отключено")
             self.status_label.setStyleSheet("color: gray;")
+            self._update_ui_states()
 
     def on_connected(self):
         self.status_label.setText("Подключено")
         self.status_label.setStyleSheet("color: green;")
         self.log("Подключено к каналу", "info")
-        # сразу спрашиваем состояния, иначе индикаторы висят «неизвестно»
-        # до первого события device
-        self.send_devices()
+        self.send_request("devices")
+        self.send_request("subscribe", events=["scan", "weight", "device", "job", "print.job"])
+        self._update_ui_states()
 
     def on_disconnected(self):
         self.status_label.setText("Отключено")
         self.status_label.setStyleSheet("color: gray;")
         self.log("Отключено от канала", "info")
+        self.stream_cb.setChecked(False)   # иначе поток будет писать в мёртвый сокет
         if self.socket:
             self.socket.deleteLater()
             self.socket = None
+        self.attached_devices.clear()
+        self._update_ui_states()
 
     def on_error(self, error):
-        # Qt на Windows зовёт отсутствующий канал «Invalid name» — по этой строке
-        # не догадаться, что служба просто не запущена; пишем прямо
         if error == QLocalSocket.LocalSocketError.ServerNotFoundError:
-            msg = ("канал не найден — служба не запущена "
-                   "(python -m devices)")
+            msg = "канал не найден — служба не запущена (python -m desktop.devices)"
         else:
             msg = self.socket.errorString() if self.socket else str(error)
         self.status_label.setText("Ошибка")
@@ -289,8 +366,7 @@ class SimulatorWindow(QWidget):
         if not self.socket:
             return
         data = self.socket.readAll().data().decode('utf-8', errors='ignore')
-        lines = data.split('\n')
-        for line in lines:
+        for line in data.split('\n'):
             line = line.strip()
             if line:
                 self.process_response(line)
@@ -318,25 +394,34 @@ class SimulatorWindow(QWidget):
             self.log(f"← [невалидный JSON] {line}", "error")
             return
 
-        # Обработка события
         if "event" in data:
             event = data["event"]
             if event == "device":
                 self.handle_device_event(data)
+            elif event == "print.job":
+                self.handle_print_job(data)
             self.log(f"{json.dumps(data, ensure_ascii=False)}", "received")
             return
 
-        # Обработка ответа с ошибкой
-        if "error" in data:
-            error_msg = data["error"]
-            if isinstance(error_msg, dict):
-                error_text = error_msg.get("message", str(error_msg))
-            else:
-                error_text = str(error_msg)
+        # Обработка ответов на attach/detach
+        req_id = data.get("id")
+        if data.get("ok"):
+            # Служба в ответе на attach/detach присылает актуальный список ролей —
+            # берём его целиком, чтобы своё представление не разъезжалось с её.
+            if "attached" in data:
+                self.attached_devices = set(data["attached"])
+        elif "error" in data:
+            err_code = data["error"].get("code")
+            if err_code == "busy":
+                self.log("Устройство уже занято другим клиентом", "error")
+                # Откатываем галочку
+                # Определяем, какое устройство пытались занять
+                # (упрощенный подход: просто снимаем все галочки, которые не подтверждены)
+            elif err_code == "not_attached":
+                self.log("Сначала включите эмуляцию устройства", "error")
             self.log(f"{json.dumps(data, ensure_ascii=False)}", "error")
             return
 
-        # Ответ на `devices` — заодно поднимаем индикаторы
         devices = data.get("devices")
         if isinstance(devices, dict):
             for dev, state in devices.items():
@@ -344,54 +429,50 @@ class SimulatorWindow(QWidget):
                     self.device_states[dev] = state
             self.update_device_indicators()
 
-        # Обычный ответ
         self.log(f"{json.dumps(data, ensure_ascii=False)}", "received")
 
     def handle_device_event(self, data):
-        # служба шлёт id/state, старые сборки — device/status
-        device = data.get("id") or data.get("device")
+        device = data.get("device") or data.get("id")
         status = data.get("state") or data.get("status")
         reason = data.get("reason", "")
         if device not in self.device_states:
             return
         self.device_states[device] = status
         self.update_device_indicators()
-        # Логируем с дополнительной информацией
         log_msg = f"событие device: {device} -> {status}"
         if reason:
             log_msg += f" (причина: {reason})"
         self.log(log_msg, "received")
 
+    def handle_print_job(self, data):
+        job_id = data.get("job", "")
+        payload = data.get("payload", "")
+        self.zpl_text.append(f"--- Job: {job_id} ---\n{payload}\n")
+        # Авто-подтверждение задания (Auto-ack)
+        self.send_request("emit", event="job", job=job_id, state="done")
+
     def update_device_indicators(self):
-        # Обновляем текстовые метки и цвета
         mapping = {
             "scanner": self.ind_scan,
             "scale": self.ind_weight,
             "printer": self.ind_printer,
         }
-        # Исправляем названия для отображения
-        display_names = {
-            "scanner": "Сканер",
-            "scale": "Весы",
-            "printer": "Принтер"
-        }
         for dev, lbl in mapping.items():
             state = self.device_states.get(dev)
-            display_name = display_names.get(dev, dev.capitalize())
             if state is None:
-                lbl.setText(f"{display_name}: неизвестно")
+                lbl.setText(f"{dev}: неизвестно")
                 lbl.setStyleSheet("background-color: lightgray;")
             elif state == "online":
-                lbl.setText(f"{display_name}: online")
+                lbl.setText(f"{dev}: online")
                 lbl.setStyleSheet("background-color: lightgreen;")
             elif state == "offline":
-                lbl.setText(f"{display_name}: offline")
+                lbl.setText(f"{dev}: offline")
                 lbl.setStyleSheet("background-color: lightcoral;")
             elif state == "error":
-                lbl.setText(f"{display_name}: error")
+                lbl.setText(f"{dev}: error")
                 lbl.setStyleSheet("background-color: yellow;")
             else:
-                lbl.setText(f"{display_name}: {state}")
+                lbl.setText(f"{dev}: {state}")
                 lbl.setStyleSheet("background-color: lightgray;")
 
     # ---------- Логирование ----------
@@ -410,32 +491,17 @@ class SimulatorWindow(QWidget):
         if msg_type == "error":
             full = f'<font color="red">{full}</font>'
         self.log_text.append(full)
-        # Автопрокрутка вниз
         cursor = self.log_text.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         self.log_text.setTextCursor(cursor)
 
-    # ---------- Команды ----------
-    def send_hello(self):
-        self.send_request("hello", protocol=1, client="simulator")
-
-    def send_devices(self):
-        self.send_request("devices")
-
-    def send_subscribe(self):
-        events = ["scan", "weight", "device", "job"]
-        self.send_request("subscribe", events=events)
-
-    def send_unsubscribe(self):
-        events = ["scan", "weight", "device", "job"]
-        self.send_request("unsubscribe", events=events)
-
+    # ---------- Команды от кнопок ----------
     def send_scan(self):
         code = self.scan_code_edit.text().strip()
         if not code:
             self.log("Введите код скана", "error")
             return
-        self.send_request("debug_emit", event="scan", code=code)
+        self.send_request("emit", event="scan", code=code)
 
     def send_weight(self):
         val_text = self.weight_edit.text().strip()
@@ -448,64 +514,53 @@ class SimulatorWindow(QWidget):
             self.log("Вес должен быть числом", "error")
             return
         stable = self.stable_cb.isChecked()
-        self.send_request("debug_emit", event="weight", value=value, unit="g", stable=stable)
+        self.send_request("emit", event="weight", value=value, unit="g", stable=stable)
 
-    def send_device_state(self):
-        dev_map = {"Сканер": "scanner", "Весы": "scale", "Принтер": "printer"}
-        device_name = self.device_combo.currentText()
-        device = dev_map[device_name]
-        state = self.state_combo.currentText()
-        reason = self.reason_edit.text().strip()
-        kwargs = {"event": "device", "device": device, "state": state}
-        if reason:
-            kwargs["reason"] = reason
-        self.send_request("debug_emit", **kwargs)
+    # ---------- Поток показаний ----------
+    def toggle_stream(self, on):
+        """Включить или выключить поток веса."""
+        if not on:
+            self.stream_timer.stop()
+            self.log("Поток весов остановлен")
+            return
+        if not self.weight_edit.text().strip():
+            self.log("Введите вес, вокруг которого дрожать", "error")
+            self.stream_cb.setChecked(False)
+            return
+        self._settling = self.STREAM_SETTLE_TICKS
+        self.stream_timer.start()
+        self.log("Поток весов запущен: 10 раз в секунду")
+
+    def settle_stream(self):
+        """Прекратить дрожание — как будто груз успокоился на платформе."""
+        self._settling = 0
+
+    def _stream_tick(self):
+        """Одно показание: пока груз «оседает» — дрожит и неустойчиво."""
+        try:
+            base = float(self.weight_edit.text().strip())
+        except ValueError:
+            self.stream_cb.setChecked(False)
+            return
+        if self._settling > 0:
+            self._settling -= 1
+            value, stable = base + random.uniform(-40.0, 40.0), False
+        else:
+            value, stable = base, True
+        self.send_request("emit", event="weight",
+                          value=round(value, 1), unit="g", stable=stable)
+
+    def send_device_state(self, device, state):
+        self.send_request("emit", event="device", device=device, state=state, reason="manual override")
 
     def send_print(self):
         key = self.print_key_edit.text().strip()
-        fmt = self.print_format_edit.text().strip() or "zpl"
-        payload = self.print_payload_edit.toPlainText().strip()
-        copies_text = self.print_copies_edit.text().strip()
         if not key:
             self.log("Введите ключ", "error")
             return
-        if not payload:
-            self.log("Введите payload", "error")
-            return
-        try:
-            copies = int(copies_text) if copies_text else 1
-        except ValueError:
-            self.log("Копии должны быть целым числом", "error")
-            return
-        self.send_request("print", key=key, format=fmt, payload=payload, copies=copies)
+        payload = "^XA^FO50,50^ADN,36,20^FDTest^FS^XZ"
+        self.send_request("print", key=key, format="zpl", payload=payload, copies=1)
 
-    def send_print_queue(self):
-        self.send_request("print.queue")
-
-    def send_print_status(self):
-        job_id = self.job_id_edit.text().strip()
-        if not job_id:
-            self.log("Введите Job ID", "error")
-            return
-        self.send_request("print.status", job=job_id)  # было job_id
-
-    def send_print_retry(self):
-        job_id = self.job_id_edit.text().strip()
-        if not job_id:
-            self.log("Введите Job ID", "error")
-            return
-        self.send_request("print.retry", job=job_id)  # было job_id
-
-    def send_scale_read(self):
-        self.send_request("scale.read", stable=True, timeout_ms=5000)
-
-    def send_scale_tare(self):
-        self.send_request("scale.tare")
-
-    def send_shutdown(self):
-        self.send_request("shutdown")
-
-    # ---------- Закрытие окна ----------
     def closeEvent(self, event):
         self.disconnect_from_server()
         event.accept()

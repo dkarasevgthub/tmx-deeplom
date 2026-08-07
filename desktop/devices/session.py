@@ -1,32 +1,21 @@
-"""Client session handling for devices.
-
-Each connected client is a :class:`ClientSession`. It does line-based
-framing over the socket, parses JSON requests, dispatches them to the
-relevant driver, and writes flat JSON responses back. It also filters
-outgoing events by the client's subscriptions.
-
-The protocol is flat (see devices-service.md, section 4)::
-
-    request  {"id": 17, "cmd": "print", ...}
-    response {"id": 17, "ok": true, "job": "j-1", "state": "queued"}
-    event    {"event": "scan", "code": "..."}
-"""
+"""Client session handling for devices."""
 
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
-from .drivers.base import DeviceDriver
 from .drivers.printer import PrinterDriver
 from .drivers.scale import ScaleDriver, ScaleTimeoutError
-from .drivers.scanner import ScannerDriver
 from .protocol import (
     ALL_EVENTS,
-    CMD_DEBUG_EMIT,
+    CMD_ATTACH,
+    CMD_DETACH,
     CMD_DEVICES,
+    CMD_EMIT,
     CMD_HELLO,
     CMD_PRINT,
     CMD_PRINT_QUEUE,
@@ -39,12 +28,18 @@ from .protocol import (
     CMD_UNSUBSCRIBE,
     DEVICE_STATES,
     ERR_BAD_REQUEST,
+    ERR_BUSY,
     ERR_INCOMPATIBLE,
     ERR_INTERNAL,
     ERR_NO_DEVICE,
+    ERR_NOT_ATTACHED,
     ERR_PRINTER_OFFLINE,
     ERR_SCALE_TIMEOUT,
     ERR_UNKNOWN_COMMAND,
+    EVENT_JOB,
+    EVENT_WEIGHT,
+    JOB_DONE,
+    JOB_QUEUED,
     PRINT_FORMATS,
     PROTOCOL_VERSION,
     SUPPORTED_PROTOCOL_VERSIONS,
@@ -53,46 +48,52 @@ from .protocol import (
     make_response,
     parse_frame,
 )
+from .slot import DeviceSlot
 
 logger = logging.getLogger(__name__)
 
 
 class ClientSession(QObject):
-    """One connected client: framing, dispatch, subscription filtering.
+    """One connected client: framing, dispatch, subscription filtering."""
 
-    Parameters
-    ----------
-    socket:
-        The ``QLocalSocket`` for this connection.
-    scanner, scale, printer:
-        Driver instances (any may be ``None``).
-    """
-
-    #: Emitted when the client asks the service to shut down.
     shutdown_requested = pyqtSignal()
+    print_routed = pyqtSignal(str, str)  # job_id, payload
 
     def __init__(
         self,
         socket: Any,
-        scanner: DeviceDriver | None = None,
-        scale: DeviceDriver | None = None,
-        printer: DeviceDriver | None = None,
+        server: Any,
+        scanner_slot: DeviceSlot,
+        scale_slot: DeviceSlot,
+        printer_slot: DeviceSlot,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._socket = socket
-        self._scanner = scanner
-        self._scale = scale
-        self._printer = printer
+        self._server = server
+        self._scanner_slot = scanner_slot
+        self._scale_slot = scale_slot
+        self._printer_slot = printer_slot
         self._subscriptions: set[str] = set()
         self._buffer = bytearray()
+        self._owned_devices: set[str] = set()
+        self._pending_jobs: set[str] = set()
 
         self._connect_socket()
 
-    # --- Socket wiring ---------------------------------------------------
+    @property
+    def socket(self) -> Any:
+        return self._socket
+
+    @property
+    def subscriptions(self) -> set[str]:
+        return set(self._subscriptions)
+
+    @property
+    def owned_devices(self) -> set[str]:
+        return set(self._owned_devices)
 
     def _connect_socket(self) -> None:
-        """Hook the socket's ``readyRead`` / ``disconnected`` signals."""
         try:
             self._socket.readyRead.connect(self._on_ready_read)
         except AttributeError:
@@ -102,20 +103,9 @@ class ClientSession(QObject):
         except AttributeError:
             pass
 
-    @property
-    def socket(self) -> Any:
-        """The underlying socket object."""
-        return self._socket
-
-    @property
-    def subscriptions(self) -> set[str]:
-        """A copy of the event names this client is subscribed to."""
-        return set(self._subscriptions)
-
     # --- Inbound framing -------------------------------------------------
 
     def _on_ready_read(self) -> None:
-        """Read available bytes, split into complete lines, dispatch."""
         try:
             data = bytes(self._socket.readAll())
         except Exception:
@@ -134,13 +124,10 @@ class ClientSession(QObject):
             self._dispatch_line(line)
 
     def _dispatch_line(self, line: bytes) -> None:
-        """Parse one line and route it to the command handler."""
         request = parse_frame(line)
         if request is None:
-            # Malformed JSON — there is no id to reply to.
             logger.debug("Session: ignored malformed frame: %r", line)
             return
-
         req_id = request.get("id", 0)
         cmd = request.get("cmd", "")
         logger.debug("Session: <- %s", request)
@@ -150,11 +137,6 @@ class ClientSession(QObject):
         self.handle_request(request)
 
     def handle_request(self, request: dict[str, Any]) -> None:
-        """Dispatch a parsed request to its command handler.
-
-        Any handler exception is turned into an ``internal`` error so a
-        driver bug never drops the client.
-        """
         req_id = request.get("id", 0)
         cmd = request.get("cmd", "")
         try:
@@ -177,7 +159,6 @@ class ClientSession(QObject):
     # --- Command handlers ------------------------------------------------
 
     def _handlers(self) -> dict[str, Any]:
-        """Return the command→handler dispatch table (rebuilt per call)."""
         return {
             CMD_HELLO: self._cmd_hello,
             CMD_DEVICES: self._cmd_devices,
@@ -190,7 +171,9 @@ class ClientSession(QObject):
             CMD_SCALE_READ: self._cmd_scale_read,
             CMD_SCALE_TARE: self._cmd_scale_tare,
             CMD_SHUTDOWN: self._cmd_shutdown,
-            CMD_DEBUG_EMIT: self._cmd_debug_emit,
+            CMD_ATTACH: self._cmd_attach,
+            CMD_DETACH: self._cmd_detach,
+            CMD_EMIT: self._cmd_emit,
         }
 
     def _cmd_hello(self, req_id: Any, request: dict[str, Any]) -> None:
@@ -198,28 +181,16 @@ class ClientSession(QObject):
         if client_proto not in SUPPORTED_PROTOCOL_VERSIONS:
             self._reply(
                 req_id,
-                make_error(
-                    req_id,
-                    ERR_INCOMPATIBLE,
-                    f"protocol {client_proto} not supported",
-                ),
+                make_error(req_id, ERR_INCOMPATIBLE, f"protocol {client_proto} not supported"),
             )
             return
-        self._reply(
-            req_id,
-            make_response(
-                req_id,
-                True,
-                service="devices",
-                protocol=SUPPORTED_PROTOCOL_VERSIONS,
-            ),
-        )
+        self._reply(req_id, make_response(req_id, True, service="devices", protocol=SUPPORTED_PROTOCOL_VERSIONS))
 
     def _cmd_devices(self, req_id: Any, request: dict[str, Any]) -> None:
         states = {
-            "scanner": self._device_state(self._scanner),
-            "scale": self._device_state(self._scale),
-            "printer": self._device_state(self._printer),
+            "scanner": self._scanner_slot.active_driver().state,
+            "scale": self._scale_slot.active_driver().state,
+            "printer": self._printer_slot.active_driver().state,
         }
         self._reply(req_id, make_response(req_id, True, devices=states))
 
@@ -228,22 +199,51 @@ class ClientSession(QObject):
         if not isinstance(events, list):
             self._reply(req_id, make_error(req_id, ERR_BAD_REQUEST, "'events' must be a list"))
             return
+        fresh_weight = EVENT_WEIGHT in events and EVENT_WEIGHT not in self._subscriptions
         for evt in events:
             if evt in ALL_EVENTS:
                 self._subscriptions.add(evt)
-        logger.info("Session: subscribed -> %s", sorted(self._subscriptions))
         self._reply(req_id, make_response(req_id, True, subscribed=sorted(self._subscriptions)))
+        if fresh_weight:
+            self._push_current_weight()
+
+    def _push_current_weight(self) -> None:
+        """Отдать последнее показание сразу после подписки.
+
+        Драйвер шлёт событие только при изменении, поэтому на неподвижных весах
+        новый подписчик не услышал бы ничего и показывал бы прочерк вместо нуля.
+        """
+        scale = self._scale_slot.active_driver()
+        reading = getattr(scale, "last_reading", lambda: None)()
+        if reading is None:
+            return
+        value, unit, stable = reading
+        self.send_event(EVENT_WEIGHT, {"value": value, "unit": unit, "stable": stable})
 
     def _cmd_unsubscribe(self, req_id: Any, request: dict[str, Any]) -> None:
         events = request.get("events", []) or []
         if isinstance(events, list):
             for evt in events:
                 self._subscriptions.discard(evt)
-        logger.info("Session: subscribed -> %s", sorted(self._subscriptions))
         self._reply(req_id, make_response(req_id, True, subscribed=sorted(self._subscriptions)))
 
     def _cmd_print(self, req_id: Any, request: dict[str, Any]) -> None:
-        printer = self._printer
+        printer_slot = self._printer_slot
+        if printer_slot.is_simulated():
+            # Reverse flow: route to simulator
+            try:
+                payload = str(request.get("payload", ""))
+            except (TypeError, ValueError):
+                self._reply(req_id, make_error(req_id, ERR_BAD_REQUEST, "invalid print arguments"))
+                return
+            job_id = f"j-{uuid.uuid4().hex[:8]}"
+            self._reply(req_id, make_response(req_id, True, job=job_id, state=JOB_QUEUED))
+            self._pending_jobs.add(job_id)
+            self.print_routed.emit(job_id, payload)
+            QTimer.singleShot(2000, lambda: self._auto_ack_job(job_id))
+            return
+
+        printer = printer_slot.active_driver()
         if not isinstance(printer, PrinterDriver):
             self._reply(req_id, make_error(req_id, ERR_PRINTER_OFFLINE, "no printer driver"))
             return
@@ -259,15 +259,19 @@ class ClientSession(QObject):
             self._reply(req_id, make_error(req_id, ERR_BAD_REQUEST, f"unknown format: {fmt}"))
             return
         job_id, state = printer.submit(key, fmt, payload, copies)
-        # ВАЖНО: отправляем ответ клиенту
         self._reply(req_id, make_response(req_id, True, job=job_id, state=state))
 
+    def _auto_ack_job(self, job_id: str) -> None:
+        if job_id in self._pending_jobs:
+            self._pending_jobs.discard(job_id)
+            self._server.broadcast(EVENT_JOB, {"job": job_id, "state": JOB_DONE, "error": "auto-ack"})
+
     def _cmd_print_status(self, req_id: Any, request: dict[str, Any]) -> None:
-        printer = self._printer
+        printer = self._printer_slot.active_driver()
         if not isinstance(printer, PrinterDriver):
             self._reply(req_id, make_error(req_id, ERR_NO_DEVICE, "no printer driver"))
             return
-        job_id = str(request.get("job", ""))  # или "job_id"
+        job_id = str(request.get("job", ""))
         if not job_id:
             self._reply(req_id, make_error(req_id, ERR_BAD_REQUEST, "missing job id"))
             return
@@ -275,24 +279,22 @@ class ClientSession(QObject):
         if state is None:
             self._reply(req_id, make_error(req_id, ERR_BAD_REQUEST, f"unknown job: {job_id}"))
             return
-        # ВАЖНО: отправляем ответ клиенту
         self._reply(req_id, make_response(req_id, True, job=job_id, state=state))
 
     def _cmd_print_queue(self, req_id: Any, request: dict[str, Any]) -> None:
-        printer = self._printer
+        printer = self._printer_slot.active_driver()
         if not isinstance(printer, PrinterDriver):
             self._reply(req_id, make_error(req_id, ERR_NO_DEVICE, "no printer driver"))
             return
         jobs = printer.get_queue()
-        # ВАЖНО: отправляем ответ клиенту
         self._reply(req_id, make_response(req_id, True, jobs=jobs))
 
     def _cmd_print_retry(self, req_id: Any, request: dict[str, Any]) -> None:
-        printer = self._printer
+        printer = self._printer_slot.active_driver()
         if not isinstance(printer, PrinterDriver):
             self._reply(req_id, make_error(req_id, ERR_NO_DEVICE, "no printer driver"))
             return
-        job_id = str(request.get("job", ""))  # или "job_id"
+        job_id = str(request.get("job", ""))
         if not job_id:
             self._reply(req_id, make_error(req_id, ERR_BAD_REQUEST, "missing job id"))
             return
@@ -300,11 +302,10 @@ class ClientSession(QObject):
         if state is None:
             self._reply(req_id, make_error(req_id, ERR_BAD_REQUEST, f"unknown job: {job_id}"))
             return
-        # ВАЖНО: отправляем ответ клиенту
         self._reply(req_id, make_response(req_id, True, job=job_id, state=state))
 
     def _cmd_scale_read(self, req_id: Any, request: dict[str, Any]) -> None:
-        scale = self._scale
+        scale = self._scale_slot.active_driver()
         if not isinstance(scale, ScaleDriver):
             self._reply(req_id, make_error(req_id, ERR_NO_DEVICE, "no scale driver"))
             return
@@ -315,20 +316,14 @@ class ClientSession(QObject):
         except ScaleTimeoutError:
             self._reply(req_id, make_error(req_id, ERR_SCALE_TIMEOUT, "scale did not stabilise"))
             return
-        # ВАЖНО: отправляем ответ клиенту
-        self._reply(
-            req_id,
-            # значение получено методом read_stable, поэтому оно устойчиво;
-            # эхо want_stable вводило клиента в заблуждение
-            make_response(req_id, True, value=value, unit="g", stable=True),
-        )
+        self._reply(req_id, make_response(req_id, True, value=value, unit="g", stable=True))
 
     def _cmd_scale_tare(self, req_id: Any, request: dict[str, Any]) -> None:
-        scale = self._scale
+        scale = self._scale_slot.active_driver()
         if not isinstance(scale, ScaleDriver):
             self._reply(req_id, make_error(req_id, ERR_NO_DEVICE, "no scale driver"))
             return
-        if not scale.is_open:
+        if not scale.is_open():
             self._reply(req_id, make_error(req_id, ERR_NO_DEVICE, "scale is not online"))
             return
         if not scale.tare():
@@ -337,54 +332,97 @@ class ClientSession(QObject):
         self._reply(req_id, make_response(req_id, True))
 
     def _cmd_shutdown(self, req_id: Any, request: dict[str, Any]) -> None:
-        logger.info("Session: shutdown requested")
         self._reply(req_id, make_response(req_id, True))
         self.shutdown_requested.emit()
 
-    def _cmd_debug_emit(self, req_id: Any, request: dict[str, Any]) -> None:
-        """Inject an event via the corresponding driver (debug console)."""
+    def _cmd_attach(self, req_id: Any, request: dict[str, Any]) -> None:
+        devices = request.get("devices", []) or []
+        if not isinstance(devices, list):
+            self._reply(req_id, make_error(req_id, ERR_BAD_REQUEST, "'devices' must be a list"))
+            return
+
+        attached = []
+        for dev in devices:
+            slot = self._slot_by_id(dev)
+            if slot is None:
+                self._reply(req_id, make_error(req_id, ERR_NO_DEVICE, f"unknown device: {dev}"))
+                return
+            if slot.attach():
+                self._owned_devices.add(dev)
+                attached.append(dev)
+            else:
+                self._reply(req_id, make_error(req_id, ERR_BUSY, f"{dev} already attached"))
+                return
+        self._reply(req_id, make_response(req_id, True, attached=attached))
+
+    def _cmd_detach(self, req_id: Any, request: dict[str, Any]) -> None:
+        devices = request.get("devices", []) or []
+        if not isinstance(devices, list):
+            self._reply(req_id, make_error(req_id, ERR_BAD_REQUEST, "'devices' must be a list"))
+            return
+
+        still_attached = list(self._owned_devices)
+        for dev in devices:
+            if dev in self._owned_devices:
+                slot = self._slot_by_id(dev)
+                if slot:
+                    slot.detach()
+                self._owned_devices.discard(dev)
+                still_attached.remove(dev)
+        self._reply(req_id, make_response(req_id, True, attached=still_attached))
+
+    def _cmd_emit(self, req_id: Any, request: dict[str, Any]) -> None:
         event = str(request.get("event", ""))
+
         if event == "scan":
-            scanner = self._scanner
-            if not isinstance(scanner, ScannerDriver) or not hasattr(scanner, "emit_scan"):
-                self._reply(req_id, make_error(req_id, ERR_NO_DEVICE, "no scanner to emit"))
+            if "scanner" not in self._owned_devices:
+                self._reply(req_id, make_error(req_id, ERR_NOT_ATTACHED, "scanner not attached"))
                 return
             code = str(request.get("code", ""))
-            scanner.emit_scan(code)
+            self._scanner_slot.active_driver().emit_scan(code)
             self._reply(req_id, make_response(req_id, True))
+
         elif event == "weight":
-            scale = self._scale
-            if not hasattr(scale, "emit_weight"):
-                self._reply(req_id, make_error(req_id, ERR_NO_DEVICE, "no scale to emit"))
+            if "scale" not in self._owned_devices:
+                self._reply(req_id, make_error(req_id, ERR_NOT_ATTACHED, "scale not attached"))
                 return
             value = float(request.get("value", 0.0))
             stable = bool(request.get("stable", True))
-            scale.emit_weight(value, "g", stable)
+            self._scale_slot.active_driver().emit_weight(value, "g", stable)
             self._reply(req_id, make_response(req_id, True))
+
         elif event == "device":
-            # устройство берём из `device`: поле `id` занято номером запроса.
-            # `status` понимаем наравне со `state` — так шлют старые консоли.
-            dev = str(request.get("device") or "")
-            state = str(request.get("state") or request.get("status") or "")
-            reason = str(request.get("reason", ""))
-            driver = self._driver_by_id(dev)
-            if driver is None:
-                self._reply(req_id, make_error(req_id, ERR_NO_DEVICE, f"no device: {dev}"))
+            dev = str(request.get("device", ""))
+            if dev not in self._owned_devices:
+                self._reply(req_id, make_error(req_id, ERR_NOT_ATTACHED, f"{dev} not attached"))
                 return
+            state = str(request.get("state", ""))
+            reason = str(request.get("reason", ""))
             if state not in DEVICE_STATES:
                 self._reply(req_id, make_error(req_id, ERR_BAD_REQUEST, f"bad state: {state}"))
                 return
-            self._set_driver_state(driver, state, reason)
+            slot = self._slot_by_id(dev)
+            if slot:
+                slot.active_driver()._set_state(state, reason)
             self._reply(req_id, make_response(req_id, True))
+
+        elif event == "job":
+            if "printer" not in self._owned_devices:
+                self._reply(req_id, make_error(req_id, ERR_NOT_ATTACHED, "printer not attached"))
+                return
+            job_id = str(request.get("job", ""))
+            state = str(request.get("state", JOB_DONE))
+            if job_id in self._pending_jobs:
+                self._pending_jobs.discard(job_id)
+            self._server.broadcast(EVENT_JOB, {"job": job_id, "state": state, "error": ""})
+            self._reply(req_id, make_response(req_id, True))
+
         else:
-            self._reply(
-                req_id, make_error(req_id, ERR_BAD_REQUEST, f"unknown emit event: {event}")
-            )
+            self._reply(req_id, make_error(req_id, ERR_BAD_REQUEST, f"unknown emit event: {event}"))
 
     # --- Outbound --------------------------------------------------------
 
     def send_event(self, event_name: str, data: dict[str, Any]) -> None:
-        """Send an event to the client, but only if subscribed."""
         if event_name not in self._subscriptions:
             return
         frame = make_event(event_name, **data)
@@ -392,46 +430,39 @@ class ClientSession(QObject):
         self._write(frame)
 
     def _reply(self, req_id: Any, frame: dict[str, Any]) -> None:
-        """Write a response frame."""
-        logger.info(f"Session: replying to {req_id} with {frame}")  # <-- добавить
+        logger.info(f"Session: replying to {req_id} with {frame}")
         self._write(frame)
 
     def _write(self, frame: dict[str, Any]) -> None:
-        """Serialize *frame* and write it to the socket."""
         from .protocol import encode_frame
         try:
             data = encode_frame(frame)
-            logger.info(f"Session: writing {len(data)} bytes")  # <-- добавить
+            logger.info(f"Session: writing {len(data)} bytes")
             self._socket.write(data)
             self._socket.flush()
         except Exception as e:
-            logger.error(f"Session: failed to write to socket: {e}", exc_info=True)  # <-- уже есть
+            logger.error(f"Session: failed to write to socket: {e}", exc_info=True)
+
     # --- Disconnect ------------------------------------------------------
 
     def _on_disconnected(self) -> None:
-        """Clear subscriptions on disconnect."""
         logger.info("Session: client disconnected")
+        # Auto-detach owned devices
+        for dev in list(self._owned_devices):
+            slot = self._slot_by_id(dev)
+            if slot:
+                slot.detach()
+        self._owned_devices.clear()
         self._subscriptions.clear()
         self._buffer.clear()
 
     # --- Helpers ---------------------------------------------------------
 
-    @staticmethod
-    def _device_state(driver: DeviceDriver | None) -> str:
-        """Return the driver's state, or ``offline`` if no driver."""
-        return driver.state if driver is not None else "offline"
-
-    def _driver_by_id(self, device_id: str) -> DeviceDriver | None:
-        """Find a driver by its ``device_id``."""
-        for driver in (self._scanner, self._scale, self._printer):
-            if driver is not None and driver.device_id == device_id:
-                return driver
+    def _slot_by_id(self, device_id: str) -> DeviceSlot | None:
+        if device_id == "scanner":
+            return self._scanner_slot
+        if device_id == "scale":
+            return self._scale_slot
+        if device_id == "printer":
+            return self._printer_slot
         return None
-
-    def _set_driver_state(self, driver: DeviceDriver, state: str, reason: str) -> None:
-        """Force a driver's state (debug console / tests)."""
-        if hasattr(driver, "set_state_for_test"):
-            driver.set_state_for_test(state, reason)  # type: ignore[attr-defined]
-        else:
-            # Base driver exposes the protected setter; use it as a fallback.
-            driver._set_state(state, reason)

@@ -14,6 +14,9 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from ..protocol import (
     STATE_OFFLINE,
     STATE_ONLINE,
+    JOB_QUEUED,
+    JOB_PRINTING,
+    JOB_DONE,
 )
 from .base import DeviceDriver
 
@@ -61,16 +64,23 @@ class FakeScale(DeviceDriver):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(device_id="scale", auto_reconnect=False, parent=parent)
+        self._last: tuple[float, str, bool] | None = None
 
     def _do_open(self) -> None:
         self._set_state(STATE_ONLINE, "fake")
 
     def _do_close(self) -> None:
+        self._last = None
         self._set_state(STATE_OFFLINE, "closed")
+
+    def last_reading(self) -> tuple[float, str, bool] | None:
+        """Последнее показание — как у настоящего драйвера, для новых подписчиков."""
+        return self._last
 
     def emit_weight(self, value: float, unit: str = "g", stable: bool = True) -> None:
         """Emit a fake weight reading."""
         logger.info("FakeScale: value=%.2f %s stable=%s", value, unit, stable)
+        self._last = (value, unit, stable)
         self.weight.emit(value, unit, stable)
 
 
@@ -95,16 +105,16 @@ class FakePrinter(DeviceDriver):
         """Queue a fake job and immediately finish it."""
         job_id = f"j-{len(self._jobs) + 1}"
         self._jobs[job_id] = {"key": key, "format": fmt, "copies": copies}
-        self.job_status_changed.emit(job_id, self.JOB_QUEUED, "")
-        self.job_status_changed.emit(job_id, self.JOB_PRINTING, "")
-        self.job_status_changed.emit(job_id, self.JOB_DONE, "")
-        return job_id, self.JOB_DONE
+        self.job_status_changed.emit(job_id, JOB_QUEUED, "")
+        self.job_status_changed.emit(job_id, JOB_PRINTING, "")
+        self.job_status_changed.emit(job_id, JOB_DONE, "")
+        return job_id, JOB_DONE
 
     def get_status(self, job_id: str) -> str | None:
-        return self.JOB_DONE if job_id in self._jobs else None
+        return JOB_DONE if job_id in self._jobs else None
 
     def get_queue(self) -> list[dict]:
-        return [{"job": jid, "state": self.JOB_DONE} for jid in self._jobs]
+        return [{"job": jid, "state": JOB_DONE} for jid in self._jobs]
 
     def retry(self, job_id: str) -> str | None:
-        return self.JOB_DONE if job_id in self._jobs else None
+        return JOB_DONE if job_id in self._jobs else None

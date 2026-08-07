@@ -7,14 +7,9 @@ string and emits a :pyattr:`scanned` signal — subject to a 500 ms
 deduplication window, because scanners resend the same code while the
 trigger is held.
 
-Two modes of operation:
-
-* **Emulation** (``fake=True`` or no port configured): the driver stays
-  ``online`` and accepts external :meth:`emit_scan` calls to inject
-  barcodes. Used for development and tests without hardware.
-* **Real**: a ``QSerialPort`` is opened; on a port error or disconnect
-  the driver goes ``offline``/``error`` and the base class schedules a
-  reconnect.
+If no port is configured or the port is not found, the driver enters
+a search state: every few seconds it rescans available COM ports and
+attempts to open the first suitable one.
 """
 
 from __future__ import annotations
@@ -25,6 +20,7 @@ import time
 from PyQt6.QtCore import QByteArray, QObject, pyqtSignal
 from PyQt6.QtSerialPort import QSerialPort
 
+from ..config import list_ports
 from ..protocol import STATE_ERROR, STATE_OFFLINE, STATE_ONLINE
 from .base import DeviceDriver
 
@@ -37,7 +33,7 @@ TERMINATOR_CR: int = 0x0D
 #: Line feed — alternate terminator.
 TERMINATOR_LF: int = 0x0A
 #: Group Separator (0x1D) — some scanners use it as a field separator.
-BYTE_GS = b'\x1d'  # было int 0x1D
+BYTE_GS = b'\x1d'
 
 #: Byte values treated as line terminators.
 _TERMINATORS = (TERMINATOR_CR, TERMINATOR_LF)
@@ -46,6 +42,9 @@ _TERMINATORS = (TERMINATOR_CR, TERMINATOR_LF)
 
 #: Window within which an identical code is treated as a duplicate.
 DEDUP_INTERVAL_MS: int = 500
+
+#: Ports claimed by drivers to avoid conflicts during auto-search.
+_claimed_ports: set[str] = set()
 
 
 class ScannerDriver(DeviceDriver):
@@ -64,14 +63,11 @@ class ScannerDriver(DeviceDriver):
         self,
         port_name: str = "",
         baud: int = 115200,
-        fake: bool = False,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(device_id="scanner", parent=parent)
         self._port_name: str = port_name or ""
         self._baud: int = baud
-        # Emulation mode when explicitly requested or no port configured.
-        self._fake: bool = fake or not bool(self._port_name)
 
         self._serial: QSerialPort | None = None
         self._buffer: bytearray = bytearray()
@@ -81,16 +77,37 @@ class ScannerDriver(DeviceDriver):
     # --- Lifecycle -------------------------------------------------------
 
     def _do_open(self) -> None:
-        """Open the COM port, or go straight online in emulation mode."""
-        if self._fake:
-            logger.info("ScannerDriver: emulation mode (no real port)")
-            self._set_state(STATE_ONLINE, "emulation")
-            return
+        """Open the COM port, or search for one if not configured."""
+        if not self._port_name or not self._port_name.upper().startswith("COM"):
+            found_port = self._find_port()
+            if found_port:
+                logger.info("ScannerDriver: found port %s", found_port)
+                self._port_name = found_port
+            else:
+                logger.debug("ScannerDriver: no port found, searching...")
+                self._set_state(STATE_OFFLINE, "searching")
+                return
 
-        logger.info(
-            "ScannerDriver: opening %s @ %d baud", self._port_name, self._baud
-        )
+        logger.info("ScannerDriver: opening %s @ %d baud", self._port_name, self._baud)
         self._open_serial()
+
+    def _find_port(self) -> str:
+        """Find a suitable COM port. If a hint is set, match it."""
+        hint = self._port_name.lower()
+        for p in list_ports():
+            parts = p.split(" ", 1)
+            device = parts[0]
+            description = parts[1] if len(parts) > 1 else ""
+
+            if device in _claimed_ports:
+                continue
+            if hint and hint in description.lower():
+                _claimed_ports.add(device)
+                return device
+            if not hint:
+                _claimed_ports.add(device)
+                return device
+        return ""
 
     def _open_serial(self) -> None:
         """Create and open the underlying ``QSerialPort``."""
@@ -106,9 +123,17 @@ class ScannerDriver(DeviceDriver):
         if not serial.open(QSerialPort.OpenModeFlag.ReadOnly):
             error = serial.errorString()
             logger.error("ScannerDriver: failed to open %s – %s", self._port_name, error)
+            _claimed_ports.discard(self._port_name)
             serial.deleteLater()
-            self._set_state(STATE_ERROR, error)
+            # Уходим в поиск, а не в ошибку
+            self._port_name = ""
+            self._set_state(STATE_OFFLINE, "searching")
             return
+
+        serial.readyRead.connect(self._on_ready_read)
+        serial.errorOccurred.connect(self._on_error_occurred)
+        self._serial = serial
+        self._set_state(STATE_ONLINE, "port opened")
 
         serial.readyRead.connect(self._on_ready_read)
         serial.errorOccurred.connect(self._on_error_occurred)
@@ -137,6 +162,7 @@ class ScannerDriver(DeviceDriver):
             pass
         if serial.isOpen():
             serial.close()
+        _claimed_ports.discard(self._port_name)
         serial.deleteLater()
 
     # --- Slots -----------------------------------------------------------
@@ -157,24 +183,19 @@ class ScannerDriver(DeviceDriver):
             return
         msg = self._serial.errorString() if self._serial else str(error)
         logger.warning("ScannerDriver: port error (%s): %s", error, msg)
-        # Resource errors mean the port is gone: drop it and reconnect.
         if (
             error == QSerialPort.SerialPortError.ResourceError
             or error == QSerialPort.SerialPortError.DeviceNotFoundError
         ):
             self._close_serial()
-            self._set_state(STATE_OFFLINE, f"port error: {msg}")
-
+            self._port_name = ""
+            # Уходим в поиск, а не в ошибку
+            self._set_state(STATE_OFFLINE, "searching")
     # --- Parsing ---------------------------------------------------------
 
     def _feed_bytes(self, data: bytes) -> None:
-        """Accumulate *data*, extract complete lines and process them.
-
-        Exposed for testing: tests can drive the parser directly without
-        a real serial port.
-        """
+        """Accumulate *data*, extract complete lines and process them."""
         self._buffer.extend(data)
-        # Walk the buffer extracting everything up to each terminator.
         while True:
             idx = self._next_terminator()
             if idx < 0:
@@ -199,11 +220,9 @@ class ScannerDriver(DeviceDriver):
             self._handle_code(code)
 
     @staticmethod
-    @staticmethod
     def _split_codes(raw_line: bytes) -> list[str]:
         """Split *raw_line* on GS, clean and upper-case each piece."""
         out: list[str] = []
-        # используем BYTE_GS как bytes
         for piece in raw_line.split(BYTE_GS):
             text = piece.decode("ascii", errors="replace").strip().upper()
             text = text.replace("\r", "").replace("\n", "")
@@ -225,7 +244,7 @@ class ScannerDriver(DeviceDriver):
         logger.info("Scanner: barcode=%s", code)
         self.scanned.emit(code)
 
-    # --- Public emulation API --------------------------------------------
+    # --- Public emulation API (kept for FakeScanner) ---------------------
 
     def emit_scan(self, code: str) -> None:
         """Inject a barcode for emulation."""

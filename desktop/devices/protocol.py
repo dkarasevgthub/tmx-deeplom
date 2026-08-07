@@ -47,8 +47,10 @@ CMD_SCALE_READ: str = "scale.read"
 CMD_SCALE_TARE: str = "scale.tare"
 CMD_SHUTDOWN: str = "shutdown"
 
-#: Service-only command used by the debug console to inject events.
-CMD_DEBUG_EMIT: str = "debug_emit"
+#: Simulator commands for role claiming and event injection.
+CMD_ATTACH: str = "attach"
+CMD_DETACH: str = "detach"
+CMD_EMIT: str = "emit"
 
 # --- Events (sent by the service on its own initiative) ----------------
 
@@ -56,6 +58,7 @@ EVENT_SCAN: str = "scan"
 EVENT_WEIGHT: str = "weight"
 EVENT_DEVICE: str = "device"
 EVENT_JOB: str = "job"
+EVENT_PRINT_JOB: str = "print.job"
 
 # --- Error codes --------------------------------------------------------
 
@@ -65,6 +68,7 @@ ERR_NO_DEVICE: str = "no_device"
 ERR_PRINTER_OFFLINE: str = "printer_offline"
 ERR_SCALE_TIMEOUT: str = "scale_timeout"
 ERR_BUSY: str = "busy"
+ERR_NOT_ATTACHED: str = "not_attached"
 ERR_INTERNAL: str = "internal"
 ERR_INCOMPATIBLE: str = "incompatible"
 
@@ -107,7 +111,9 @@ ALL_COMMANDS: set[str] = {
     CMD_SCALE_READ,
     CMD_SCALE_TARE,
     CMD_SHUTDOWN,
-    CMD_DEBUG_EMIT,
+    CMD_ATTACH,
+    CMD_DETACH,
+    CMD_EMIT,
 }
 
 #: All event types a client may subscribe to.
@@ -116,6 +122,9 @@ ALL_EVENTS: set[str] = {
     EVENT_WEIGHT,
     EVENT_DEVICE,
     EVENT_JOB,
+    # Задание на печать, развёрнутое в сторону симулятора. Без него `subscribe`
+    # молча отбрасывал подписку, и задание не доезжало до подменного принтера.
+    EVENT_PRINT_JOB,
 }
 
 
