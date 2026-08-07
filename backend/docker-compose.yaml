@@ -1,18 +1,54 @@
-version: '3.8'
-
 services:
   db:
     image: postgres:16-alpine
     container_name: prozapas_db
     environment:
-      POSTGRES_USER: prozapas_user
-      POSTGRES_PASSWORD: zapas_zapas
-      POSTGRES_DB: prozapas_db
+      POSTGRES_USER: ${POSTGRES_USER:-prozapas_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD в .env}
+      POSTGRES_DB: ${POSTGRES_DB:-prozapas_db}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-prozapas_user} -d ${POSTGRES_DB:-prozapas_db}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
+
+  # Ходилка по ревизиям: docker compose run --rm migrate <любая команда alembic>
+  migrate:
+    build:
+      context: .
+      dockerfile: database/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-prozapas_user}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-prozapas_db}
+    volumes:
+      - ./database/models.py:/app/models.py:ro
+      - ./database/alembic/versions:/app/alembic/versions
+
+  # Начальные данные: docker compose run --rm seed
+  seed:
+    build:
+      context: .
+      dockerfile: database/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["python", "seed.py"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-prozapas_user}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-prozapas_db}
+      ADMIN_LOGIN: ${ADMIN_LOGIN:-admin}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@prozapas.ru}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?задайте ADMIN_PASSWORD в .env}
+    volumes:
+      - ./database/models.py:/app/models.py:ro
+      - ./database/seed.py:/app/seed.py:ro
 
 volumes:
   pgdata:
