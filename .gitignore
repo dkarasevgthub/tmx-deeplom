@@ -4,11 +4,10 @@ __pycache__/
 .venv/
 venv/
 
-# Тесты и инструменты
+# Кэши инструментов. Сами тесты в git едут: без них нечего запускать в CI.
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-tests
 
 # Среды разработки
 .idea/
