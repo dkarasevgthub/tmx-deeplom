@@ -193,8 +193,12 @@ GET  /auth/me                          → {user, warehouse, permissions}
 |---|---|---|---|
 | GET | `/health` | — | живость, делает `SELECT 1` |
 | GET | `/version` | — | версия сборки и ревизия схемы |
-| GET | `/bootstrap` | вход | склады, роли, разделы, права, текущий пользователь |
+| GET | `/bootstrap` | вход | склады, роли, разделы, права, текущий пользователь, сотрудники |
 | GET | `/dashboard` | вход | счётчики и лента событий |
+
+`/bootstrap` отдаёт и список сотрудников — id, имя, склад. Он нужен фильтру
+«Ответственный» на экранах заказов, отгрузки и приёмки, а `/users` для этого не
+годится: тот доступен только администратору.
 
 `/dashboard` считает по своему складу: «к отгрузке» — входящие в работе,
 «к приёмке» — исходящие в пути.
@@ -218,14 +222,16 @@ GET  /auth/me                          → {user, warehouse, permissions}
 
 ```json
 {"id": 60, "number": "2001", "status": "processing",
- "counterparty": {"id": 3, "name": "Склад №3", "owner": "ООО «Сталкер Групп»"},
+ "counterparty": {"id": 3, "name": "Склад №3", "owner": "ООО «Сталкер Групп»",
+                  "responsible": {"id": 8, "name": "Морозова Е.В."}},
  "positions_count": 4,
  "responsible": {"id": 12, "name": "Кузнецов И.А."},
  "created_at": "…", "shipped_at": null, "accepted_at": null}
 ```
 
 `counterparty` — второй склад: для исходящего это отправитель, для входящего
-заказчик.
+заказчик. Ответственный за склад приходит вместе с ним: карточка заказа
+показывает ответственных обеих сторон.
 
 **`POST /orders`** — требует `Idempotency-Key`.
 
@@ -276,6 +282,7 @@ GET  /auth/me                          → {user, warehouse, permissions}
 ```json
 {"order": {…},
  "to_pack": [{"article": "100512", "name": "Труба стальная 32×2", "unit": "м",
+              "unit_weight": 1.6,
               "ordered": 100, "packed": 37.5, "remaining": 62.5}],
  "boxes": [{"id": 7, "barcode": "WH0012001100512", "article": "100512",
             "qty": 12.5, "weight": 20.0}]}
@@ -348,9 +355,18 @@ GET  /auth/me                          → {user, warehouse, permissions}
 | GET | `/stock/{item_id}/movements` | stock: view |
 | POST | `/stock/operations` | stock: edit |
 
-**`GET /stock`** — `q`, `warehouse_id`, `below_min`, `limit`, `offset`. Элемент:
-артикул, код 1С, наименование, единица, `qty`, `free` (= `qty − reserved`),
-`reserved`.
+**`GET /stock`** — `q`, `warehouse_id`, `below_min`, `in_stock`, `limit`, `offset`.
+Элемент: артикул, код 1С, наименование, единица, `qty`, `free` (= `qty − reserved`),
+`reserved`, плюс `by_warehouse` — разбивка по складам.
+
+`in_stock` по умолчанию `true`: экран «Остатки» показывает то, что лежит на
+складе, а не всю номенклатуру. Вместе с `below_min=true` его надо снимать —
+позиция, которой ноль при минимуме пятьдесят, как раз и требует дозаказа.
+
+Разбивка нужна экрану «Новый заказ» в режиме «найти где есть»: он предлагает
+склад с наибольшим остатком, а остальные раскрывает дочерними строками. Как
+только склад выбран, режим выключается и достаточно `warehouse_id`. Название
+склада в разбивке не дублируется — клиент берёт его из `/bootstrap`.
 
 **`GET /stock/summary`** — четыре карточки экрана: всего позиций, ниже минимума,
 в резерве, свободный остаток.
@@ -379,7 +395,7 @@ GET  /auth/me                          → {user, warehouse, permissions}
 Поиск `q` идёт по генерируемой колонке `search_vector` — наименование, артикул,
 код 1С. Позиция с движениями не удаляется, а архивируется.
 
-### 6.7 Пользователи и права — 10
+### 6.7 Пользователи и права — 11
 
 | Метод | Путь | Права |
 |---|---|---|
@@ -391,11 +407,18 @@ GET  /auth/me                          → {user, warehouse, permissions}
 | POST | `/users/{id}/unblock` | users: edit |
 | POST | `/users/{id}/password` | users: edit |
 | DELETE | `/users/{id}` | users: edit |
+| GET | `/users/{id}/activity` | users: view |
 | GET | `/permissions` | users: view |
 | PUT | `/permissions` | users: edit |
 
 `POST /users` требует `login` отдельным полем. Логин и почта уникальны среди
 неудалённых. `DELETE` — мягкое удаление.
+
+**`GET /users/{id}/activity`** — история действий из `audit_log`, страницами.
+Индекс `ix_audit_log_user` на `(user_id, created_at)` существует ровно под этот
+запрос. Элемент: `entity`, `entity_id`, `action`, `created_at`. Название раздела
+и формулировку действия собирает клиент — он и так переводит статусы заказа,
+а на сервере это была бы вторая копия тех же строк.
 
 ## 7. Три транзакции
 

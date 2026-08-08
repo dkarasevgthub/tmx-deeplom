@@ -183,6 +183,17 @@ class Page(QWidget):
     def set_block_visible(self, item, visible):
         self.col.set_block_visible(item, visible)
 
+    def show_error(self, error):
+        """Сообщить об отказе сервера.
+
+        Экраны зовут это из обработчиков: у ошибки API есть `title` для
+        человека, а разбирать её причину — дело вызывающего.
+        """
+        from ..widgets.dialog import confirm_dialog
+        title = getattr(error, "title", None) or str(error)
+        confirm_dialog(self, "Не получилось", title,
+                       confirm_label="Понятно", cancel_label="")
+
     def refresh_gaps(self):
         self.col.refresh_gaps()
 

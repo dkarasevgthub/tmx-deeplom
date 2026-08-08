@@ -1,6 +1,10 @@
 """Модели ProЗапас — источник правды для схемы.
 
 Миграции генерируются отсюда: `alembic revision --autogenerate`.
+
+Связи (`relationship`) на схему не влияют — `alembic check` их не видит и
+ревизий из них не делает. Заведены для API: без них каждый роутер собирал бы
+`JOIN` руками. В списках подгружать явно через `selectinload`, иначе N+1.
 """
 from __future__ import annotations
 
@@ -26,7 +30,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
@@ -123,6 +127,11 @@ class Warehouse(PkMixin, TimestampMixin, SoftDeleteMixin, Base):
         ForeignKey("user_account.id", ondelete="SET NULL", use_alter=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, server_default="true")
 
+    # Склад ↔ пользователь ссылаются друг на друга, поэтому обеим связям нужен
+    # явный foreign_keys: сама SQLAlchemy выбрать между двумя ключами не может.
+    responsible: Mapped[Optional["UserAccount"]] = relationship(
+        foreign_keys=[responsible_user_id], lazy="joined")
+
 
 class CatalogItem(PkMixin, TimestampMixin, SoftDeleteMixin, Base):
     __tablename__ = "catalog_item"
@@ -169,6 +178,10 @@ class UserAccount(PkMixin, TimestampMixin, SoftDeleteMixin, Base):
     hire_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     last_login_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True)
+
+    role: Mapped["Role"] = relationship(lazy="joined")
+    warehouse: Mapped[Optional["Warehouse"]] = relationship(
+        foreign_keys=[warehouse_id], lazy="joined")
 
     __table_args__ = (
         check_enum("status", UserStatus, "status"),

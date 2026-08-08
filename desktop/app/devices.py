@@ -20,9 +20,14 @@ from collections import deque
 from PyQt6.QtCore import QDateTime, QObject, QTimer, pyqtSignal
 from PyQt6.QtNetwork import QLocalSocket
 
+from . import config
+
 # ── protocol (mirrors devices/protocol.py) ─────────────────────────
 PROTOCOL_VERSION = 1
-PIPE_NAME = "prozapas-devices"      # короткое имя: префикс канала Qt добавит сам
+#: Короткое имя: префикс канала Qt добавит сам. Читаем из настроек — служба
+#: берёт его оттуда же, и раньше эти два значения могли разойтись: переменную
+#: ставили, служба слушала новый канал, а приложение стучалось в старый.
+PIPE_NAME = config.get("PROZAPAS_PIPE_NAME")
 
 OFFLINE = "offline"
 ONLINE = "online"

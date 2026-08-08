@@ -1,0 +1,52 @@
+2026-08-08 15:18:03,690 - devices - INFO - Logging initialised at level=INFO path=C:\ProgramData/ProZapas/devices.log
+2026-08-08 15:18:03,693 - devices.server - INFO - DeviceServer: listening on /var/folders/gn/0293c84s0hd03scjt8w55hfh0000gn/T/prozapas-devices
+2026-08-08 15:18:03,708 - devices.server - INFO - DeviceServer: client connected (total=1)
+2026-08-08 15:18:03,709 - devices.session - INFO - Session: client disconnected
+2026-08-08 15:18:03,709 - devices.server - INFO - DeviceServer: client disconnected (total=0)
+2026-08-08 15:18:03,709 - devices.server - INFO - DeviceServer: client connected (total=1)
+2026-08-08 15:18:03,710 - devices.session - INFO - Session: replying to 1 with {'id': 1, 'ok': True, 'service': 'devices', 'protocol': [1]}
+2026-08-08 15:18:03,710 - devices.session - INFO - Session: writing 61 bytes
+2026-08-08 15:18:03,710 - devices.session - INFO - Session: replying to 2 with {'id': 2, 'ok': True, 'devices': {'scanner': 'offline', 'scale': 'offline', 'printer': 'offline'}}
+2026-08-08 15:18:03,710 - devices.session - INFO - Session: writing 99 bytes
+2026-08-08 15:18:03,710 - devices.session - INFO - Session: replying to 3 with {'id': 3, 'ok': True, 'subscribed': ['device', 'job', 'scan']}
+2026-08-08 15:18:03,710 - devices.session - INFO - Session: writing 63 bytes
+2026-08-08 15:18:31,290 - devices.session - INFO - Session: replying to 4 with {'id': 4, 'ok': True, 'subscribed': ['device', 'job', 'scan']}
+2026-08-08 15:18:31,291 - devices.session - INFO - Session: writing 63 bytes
+2026-08-08 15:18:31,932 - devices.session - INFO - Session: replying to 5 with {'id': 5, 'ok': True, 'subscribed': ['device', 'job', 'scan']}
+2026-08-08 15:18:31,932 - devices.session - INFO - Session: writing 63 bytes
+2026-08-08 15:18:31,956 - devices.session - INFO - Session: replying to 6 with {'id': 6, 'ok': True, 'subscribed': ['device', 'job', 'scan']}
+2026-08-08 15:18:31,956 - devices.session - INFO - Session: writing 63 bytes
+2026-08-08 15:18:32,559 - devices.session - INFO - Session: replying to 7 with {'id': 7, 'ok': True, 'subscribed': ['device', 'job', 'scan']}
+2026-08-08 15:18:32,559 - devices.session - INFO - Session: writing 63 bytes
+2026-08-08 15:18:48,025 - devices.session - INFO - Session: replying to 8 with {'id': 8, 'ok': True, 'subscribed': ['device', 'job', 'scan']}
+2026-08-08 15:18:48,026 - devices.session - INFO - Session: writing 63 bytes
+2026-08-08 15:18:54,582 - devices.session - INFO - Session: replying to 9 with {'id': 9, 'ok': True, 'subscribed': ['device', 'job', 'scan']}
+2026-08-08 15:18:54,582 - devices.session - INFO - Session: writing 63 bytes
+2026-08-08 15:18:54,606 - devices.session - INFO - Session: replying to 10 with {'id': 10, 'ok': True, 'subscribed': ['device', 'job', 'scan']}
+2026-08-08 15:18:54,606 - devices.session - INFO - Session: writing 64 bytes
+2026-08-08 15:18:55,503 - devices.session - INFO - Session: replying to 11 with {'id': 11, 'ok': True, 'subscribed': ['device', 'job', 'scan']}
+2026-08-08 15:18:55,503 - devices.session - INFO - Session: writing 64 bytes
+2026-08-08 15:19:20,749 - devices.session - INFO - Session: replying to 12 with {'id': 12, 'ok': True, 'subscribed': ['device', 'job', 'scan']}
+2026-08-08 15:19:20,750 - devices.session - INFO - Session: writing 64 bytes
+2026-08-08 15:19:21,358 - devices.session - INFO - Session: replying to 13 with {'id': 13, 'ok': True, 'subscribed': ['device', 'job', 'scan']}
+2026-08-08 15:19:21,359 - devices.session - INFO - Session: writing 64 bytes
+2026-08-08 15:19:21,382 - devices.session - INFO - Session: replying to 14 with {'id': 14, 'ok': True, 'subscribed': ['device', 'job', 'scan']}
+2026-08-08 15:19:21,382 - devices.session - INFO - Session: writing 64 bytes
+2026-08-08 15:19:21,955 - devices.session - INFO - Session: replying to 15 with {'id': 15, 'ok': True, 'subscribed': ['device', 'job', 'scan']}
+2026-08-08 15:19:21,955 - devices.session - INFO - Session: writing 64 bytes
+2026-08-08 15:19:33,547 - devices.session - INFO - Session: replying to 16 with {'id': 16, 'ok': True, 'subscribed': ['device', 'job', 'scan']}
+2026-08-08 15:19:33,548 - devices.session - INFO - Session: writing 64 bytes
+2026-08-08 15:19:34,783 - devices.session - INFO - Session: replying to 17 with {'id': 17, 'ok': True, 'subscribed': ['device', 'job', 'scan']}
+2026-08-08 15:19:34,783 - devices.session - INFO - Session: writing 64 bytes
+2026-08-08 15:19:34,808 - devices.session - INFO - Session: replying to 18 with {'id': 18, 'ok': True, 'subscribed': ['device', 'job', 'scan']}
+2026-08-08 15:19:34,808 - devices.session - INFO - Session: writing 64 bytes
+2026-08-08 15:19:35,774 - devices.session - INFO - Session: replying to 19 with {'id': 19, 'ok': True, 'subscribed': ['device', 'job', 'scan']}
+2026-08-08 15:19:35,775 - devices.session - INFO - Session: writing 64 bytes
+2026-08-08 15:19:41,994 - devices.session - INFO - Session: client disconnected
+2026-08-08 15:19:41,994 - devices.server - INFO - DeviceServer: client disconnected (total=0)
+2026-08-08 15:19:41,996 - devices.server - INFO - DeviceServer: client connected (total=1)
+2026-08-08 15:19:41,996 - devices.session - INFO - Session: replying to 1 with {'id': 1, 'ok': True}
+2026-08-08 15:19:41,996 - devices.session - INFO - Session: writing 22 bytes
+2026-08-08 15:19:41,997 - devices.session - INFO - Session: client disconnected
+2026-08-08 15:19:41,997 - devices.server - INFO - DeviceServer: client disconnected (total=0)
+2026-08-08 15:19:41,997 - devices.server - INFO - DeviceServer: stopping

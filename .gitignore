@@ -15,8 +15,6 @@ tests
 .vscode/
 .claude/
 
-# Рабочие данные приложения — у каждого свои
-desktop/mock_data.json
 
 # Virtual Environment
 .venv/
@@ -38,6 +36,7 @@ pgdata/
 .DS_Store
 Thumbs.db
 
-# Секреты окружения
+# Секреты окружения и настройки рабочих мест
 .env
 backend/.env
+desktop/.env

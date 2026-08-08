@@ -1687,6 +1687,16 @@
             "description": "Только позиции ниже точки дозаказа"
           },
           {
+            "name": "in_stock",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            },
+            "description": "Только позиции с остатком. По умолчанию true; с below_min=true снимать — нулевой остаток как раз и требует дозаказа"
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -2700,6 +2710,101 @@
         }
       }
     },
+    "/users/{id}/activity": {
+      "get": {
+        "tags": [
+          "Пользователи"
+        ],
+        "summary": "История действий",
+        "responses": {
+          "200": {
+            "description": "Успех",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "items",
+                    "total",
+                    "limit",
+                    "offset"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AuditEntry"
+                      }
+                    },
+                    "total": {
+                      "type": "integer",
+                      "example": 128
+                    },
+                    "limit": {
+                      "type": "integer",
+                      "example": 50
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "example": 0
+                    }
+                  },
+                  "description": "Страница истории"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          }
+        },
+        "description": "Из audit_log. Раздел и формулировку собирает клиент: он и так переводит статусы заказа, на сервере это была бы вторая копия тех же строк.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "maximum": 200
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0
+            }
+          }
+        ]
+      }
+    },
     "/permissions": {
       "get": {
         "tags": [
@@ -2851,6 +2956,10 @@
             "type": "string",
             "nullable": true,
             "example": "ООО «Сталкер Групп»"
+          },
+          "responsible": {
+            "$ref": "#/components/schemas/UserBrief",
+            "description": "Ответственный за склад. Карточка заказа показывает его для обеих сторон"
           }
         }
       },
@@ -2863,6 +2972,53 @@
           "name": {
             "type": "string",
             "example": "Кузнецов И.А."
+          }
+        }
+      },
+      "Person": {
+        "type": "object",
+        "description": "Сотрудник для фильтра: только имя и склад, без прав и почты",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string",
+            "example": "Кузнецов Игорь Александрович"
+          },
+          "warehouse_id": {
+            "type": "integer"
+          }
+        }
+      },
+      "AuditEntry": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "entity": {
+            "type": "string",
+            "enum": [
+              "order",
+              "shipment",
+              "receipt",
+              "catalog_item",
+              "stock_balance",
+              "user_account",
+              "role_permission"
+            ]
+          },
+          "entity_id": {
+            "type": "integer"
+          },
+          "action": {
+            "type": "string",
+            "example": "accepted"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -3014,6 +3170,13 @@
           },
           "warehouse": {
             "$ref": "#/components/schemas/WarehouseBrief"
+          },
+          "users": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Person"
+            },
+            "description": "Сотрудники для выпадающих фильтров. Здесь, а не в /users: тот доступен только администратору, а фильтр «Ответственный» нужен всем"
           },
           "catalog_version": {
             "type": "string"
@@ -3316,6 +3479,10 @@
           },
           "unit": {
             "type": "string"
+          },
+          "unit_weight": {
+            "type": "number",
+            "description": "Вес единицы. Экран упаковки считает по нему количество из показания весов"
           },
           "ordered": {
             "type": "number",
@@ -3624,7 +3791,7 @@
           "qty": {
             "type": "number",
             "format": "double",
-            "description": "Дробное: в справочнике есть метры и листы"
+            "description": "Итого по складам, если warehouse_id не задан"
           },
           "free": {
             "type": "number",
@@ -3640,8 +3807,34 @@
             "type": "number",
             "format": "double",
             "description": "Дробное: в справочнике есть метры и листы"
+          },
+          "by_warehouse": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StockShare"
+            },
+            "description": "Разбивка по складам. Нужна экрану «Новый заказ» в режиме «найти где есть»: он предлагает склад с наибольшим остатком, остальные раскрывает дочерними строками"
           }
         }
+      },
+      "StockShare": {
+        "type": "object",
+        "properties": {
+          "warehouse_id": {
+            "type": "integer"
+          },
+          "qty": {
+            "type": "number",
+            "format": "double",
+            "description": "Дробное: в справочнике есть метры и листы"
+          },
+          "free": {
+            "type": "number",
+            "format": "double",
+            "description": "Дробное: в справочнике есть метры и листы"
+          }
+        },
+        "description": "Название склада клиент берёт из /bootstrap, здесь только id"
       },
       "StockByWarehouse": {
         "type": "object",

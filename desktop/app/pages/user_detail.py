@@ -1,10 +1,9 @@
 """Пользователь — user detail with info grid, activity log and edit actions."""
-from datetime import datetime, timedelta
-
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from .. import store, theme
+from .. import api, fmt, reference, theme
+from ..api.errors import ApiError
 from ..widgets.blueprint import BlueprintFrame
 from ..widgets.common import Tag, button, h1, h4
 from ..widgets.dialog import confirm_dialog, form_dialog
@@ -13,51 +12,53 @@ from ..widgets.table import TableSection
 from ._ui import SplitRow
 from .base import Page
 
-ARTICLES = ["100421", "100433", "201187", "201204", "100458", "100477", "100512", "300098"]
-_ACTIVITY_BY_ROLE = {
-    "manager": [("Создал заказ №{n}", "Заказы"), ("Отклонил заказ №{n}", "Заказы"),
-                ("Отменил заказ №{n}", "Заказы"), ("Изменил позиции заказа №{n}", "Заказы"),
-                ("Отредактировал товар {a}", "Справочник")],
-    "stockman": [("Отгрузил заказ №{n}", "Отгрузка"), ("Собрал коробку по заказу №{n}", "Отгрузка"),
-                 ("Принял партию №{n}", "Приёмка"), ("Завершил приёмку №{n}", "Приёмка"),
-                 ("Скорректировал остаток {a}", "Остатки"), ("Списал товар {a}", "Справочник")],
-    "admin": [("Изменил права роли", "Пользователи"), ("Добавил пользователя", "Пользователи"),
-              ("Заблокировал пользователя", "Пользователи"), ("Отредактировал товар {a}", "Справочник"),
-              ("Скорректировал остаток {a}", "Остатки")],
+#: Сущность из audit_log → раздел приложения. Название раздела берётся из меню.
+SECTION_OF_ENTITY = {
+    "order": "orders", "shipment": "shipping", "receipt": "receiving",
+    "catalog_item": "catalog", "stock_balance": "stock",
+    "user_account": "users", "role_permission": "users",
 }
 
-
-def _gen_activity(user):
-    seed = user["id"] * 7919 + len(user["fullName"])
-
-    def rnd():
-        nonlocal seed
-        seed = (seed * 1103515245 + 12345) & 0x7fffffff
-        return seed / 0x7fffffff
-
-    pool = _ACTIVITY_BY_ROLE.get(user["role"], _ACTIVITY_BY_ROLE["manager"])
-    count = 16 + (user["id"] % 14)
-    dt = datetime(2026, 7, 24, 9, 30)
-    rows = [("Вход в систему", "—", dt)]
-    for _ in range(count):
-        dt = dt - timedelta(hours=1 + int(rnd() * 9), minutes=int(rnd() * 60))
-        action, section = pool[int(rnd() * len(pool))]
-        action = action.replace("{n}", str(3000 + int(rnd() * 999))).replace("{a}", ARTICLES[int(rnd() * len(ARTICLES))])
-        rows.append((action, section, dt))
-        if rnd() < 0.18:
-            dt = dt - timedelta(hours=int(rnd() * 6))
-            rows.append(("Выход из системы", "—", dt))
-    return [(a, s, f"{d.day:02d}.{d.month:02d}.{d.year} {d.hour:02d}:{d.minute:02d}") for a, s, d in rows]
+#: Действие → как это читается. Ключ — (сущность, действие), потом просто действие.
+ACTION_TEXT = {
+    ("order", "created"): "Создал заказ №{id}",
+    ("order", "accepted"): "Принял заказ №{id} к сборке",
+    ("order", "declined"): "Отклонил заказ №{id}",
+    ("order", "cancelled"): "Отменил заказ №{id}",
+    ("order", "updated"): "Изменил заказ №{id}",
+    ("shipment", "shipped"): "Отгрузил заказ №{id}",
+    ("shipment", "boxed"): "Собрал коробку по заказу №{id}",
+    ("receipt", "received"): "Завершил приёмку заказа №{id}",
+    ("receipt", "boxed"): "Принял коробку по заказу №{id}",
+    ("catalog_item", "created"): "Добавил позицию в справочник",
+    ("catalog_item", "updated"): "Отредактировал позицию справочника",
+    ("catalog_item", "archived"): "Архивировал позицию справочника",
+    ("stock_balance", "receipt"): "Оприходовал товар вручную",
+    ("stock_balance", "shipment"): "Отгрузил товар вручную",
+    ("stock_balance", "writeoff"): "Списал товар",
+    ("stock_balance", "recount"): "Скорректировал остаток",
+    ("user_account", "created"): "Добавил пользователя",
+    ("user_account", "updated"): "Изменил пользователя",
+    ("user_account", "blocked"): "Заблокировал пользователя",
+    ("user_account", "unblocked"): "Разблокировал пользователя",
+    ("user_account", "deleted"): "Удалил пользователя",
+    ("user_account", "password_changed"): "Сменил пароль",
+    ("role_permission", "updated"): "Изменил права роли",
+}
+PLAIN_ACTION = {"login": "Вход в систему", "logout": "Выход из системы"}
 
 
 class UserDetailPage(Page):
     def build(self):
         uid = self.params.get("id")
-        user = store.user_by_id(uid)
+        try:
+            user = api.client.user(uid)
+        except ApiError:
+            user = None
 
         crumb = QLabel(
             f'<a href="#" style="color:{theme.NEUTRAL[600]};text-decoration:none;">Пользователи</a>'
-            + (f' / {user["fullName"]}' if user else "")
+            + (f' / {user["full_name"]}' if user else "")
         )
         crumb.setObjectName("breadcrumb")
         crumb.setTextFormat(Qt.TextFormat.RichText)
@@ -67,6 +68,7 @@ class UserDetailPage(Page):
         if not user:
             self._not_found()
             return
+        self._user = user
         self._render(user)
 
     def _not_found(self):
@@ -91,7 +93,8 @@ class UserDetailPage(Page):
         who = QWidget()
         left = QHBoxLayout(who); left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(theme.SP4)
-        avatar = QLabel(store.initials(user["fullName"]))
+        parts = user["full_name"].split()
+        avatar = QLabel("".join(p[0].upper() for p in parts[:2]) or "—")
         avatar.setFixedSize(72, 72)
         avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         avatar.setStyleSheet(
@@ -100,7 +103,7 @@ class UserDetailPage(Page):
         )
         left.addWidget(avatar)
         namebox = QVBoxLayout(); namebox.setSpacing(6)
-        name = h1(user["fullName"])
+        name = h1(user["full_name"])
         # ФИО целиком длиннее любого другого заголовка в приложении: на 44px
         # строка с кнопками не помещается в окно даже стандартной ширины
         name.setStyleSheet("font-size:36px;")
@@ -114,7 +117,8 @@ class UserDetailPage(Page):
         edit.clicked.connect(lambda: self._edit(user))
         passwd = button("Сменить пароль", "secondary")
         passwd.clicked.connect(lambda: self._change_password(user))
-        block = button("Разблокировать" if user["status"] == "blocked" else "Заблокировать", "secondary")
+        blocked = user["status"] == "blocked"
+        block = button("Разблокировать" if blocked else "Заблокировать", "secondary")
         block.clicked.connect(lambda: self._toggle_block(user))
         delete = button("Удалить", "ghost")
         delete.clicked.connect(lambda: self._delete(user))
@@ -128,10 +132,12 @@ class UserDetailPage(Page):
         # info grid
         info = BlueprintFrame(padding=theme.SP6)
         cells = [
-            ("Должность", user["position"]), ("Роль", rl), ("Склад", user["warehouse"]), ("Статус", sl),
-            ("Телефон", user["phone"]), ("Email", user["email"]),
-            ("Логин", user.get("login", "—")), ("Дата приёма", user["hireDate"]),
-            ("Последний вход", user["lastLogin"]),
+            ("Должность", user.get("position") or "—"), ("Роль", rl),
+            ("Склад", (user.get("warehouse") or {}).get("name", "—")), ("Статус", sl),
+            ("Телефон", user.get("phone") or "—"), ("Email", user["email"]),
+            ("Логин", user.get("login", "—")),
+            ("Дата приёма", fmt.date(user.get("hire_date"))),
+            ("Последний вход", fmt.datetime_(user.get("last_login_at"))),
         ]
         # те же реквизиты, что в карточках заказа и партии: строка с переносом
         grid = FlowRow(h_spacing=theme.SP8, v_spacing=theme.SP4)
@@ -143,51 +149,84 @@ class UserDetailPage(Page):
         # activity
         act = BlueprintFrame(padding=theme.SP4)
         act.content_layout().addWidget(h4("История действий"))
-        rows = [([("m", dt), action, ("m", section)], None) for action, section, dt in _gen_activity(user)]
-        table = TableSection(
+        self._table = TableSection(
             headers=["Дата и время", "Действие", "Раздел"],
-            widths=[160, 0, 140], rows=rows, page_size=8, auto_rows=True, framed=False,
+            widths=[160, 0, 140], rows=[], page_size=8, auto_rows=True,
+            framed=False,
+            on_page_change=self._refresh_activity,   # страницу подгружает сервер
         )
-        act.content_layout().addWidget(table)
+        act.content_layout().addWidget(self._table)
         self.add_block(act)
         self.col.addStretch(1)
+        self._refresh_activity()
 
     def _info_cell(self, k, v):
         box = QWidget()
         lay = QVBoxLayout(box); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(2)
         kk = QLabel(k); kk.setObjectName("kicker")
-        vv = QLabel(str(v)); vv.setStyleSheet(f"font-family:{theme.font_heading()};font-size:18px;")
+        vv = QLabel(str(v))
+        vv.setStyleSheet(f"font-family:{theme.font_heading()};font-size:18px;")
         # без переноса: в строке с обтеканием ячейка получает ширину по своему
         # содержимому, и «Центральный склад» ломался на две строки
         lay.addWidget(kk); lay.addWidget(vv)
         return box
 
+    # ── история ──
+    def _action_text(self, entry):
+        text = ACTION_TEXT.get((entry["entity"], entry["action"]))
+        if text:
+            return text.replace("{id}", str(entry["entity_id"]))
+        return PLAIN_ACTION.get(entry["action"], entry["action"])
+
+    def _refresh_activity(self, page: int = 1):
+        size = self._table.page_size()
+        try:
+            payload = api.client.user_activity(
+                self._user["id"], limit=size, offset=(page - 1) * size)
+        except ApiError as exc:
+            self._table.set_empty_text(exc.title)
+            self._table.set_rows([], total=0, keep_page=True)
+            return
+
+        self._table.set_empty_text("Действий пока нет")
+        rows = [([("m", fmt.datetime_(e["created_at"])),
+                  self._action_text(e),
+                  ("m", reference.section_label(
+                      SECTION_OF_ENTITY.get(e["entity"], "")) or "—")], None)
+                for e in payload["items"]]
+        self._table.set_rows(rows, total=payload["total"], keep_page=True)
+
     # ── actions ──
     def _edit(self, user):
         fields = [
-            ("fullName", "ФИО", "text", user["fullName"]),
-            ("position", "Должность", "text", user["position"]),
-            ("role", "Роль", "select", user["role"], [("manager", "Менеджер"), ("stockman", "Кладовщик"), ("admin", "Администратор")]),
-            ("warehouse", "Склад", "search-select", user["warehouse"], [(w, w) for w in store.warehouses()]),
-            ("status", "Статус", "select", user["status"], [("active", "Активен"), ("blocked", "Заблокирован")]),
-            ("phone", "Телефон", "text", user["phone"]),
+            ("full_name", "ФИО", "text", user["full_name"]),
+            ("position", "Должность", "text", user.get("position") or ""),
+            ("role", "Роль", "select", user["role"],
+             [(r["code"], r["label"]) for r in reference.roles()]),
+            ("warehouse_id", "Склад", "search-select",
+             (user.get("warehouse") or {}).get("id"),
+             [(w["id"], w["name"]) for w in reference.warehouses()]),
+            ("status", "Статус", "select", user["status"],
+             [("active", "Активен"), ("blocked", "Заблокирован")]),
+            ("phone", "Телефон", "text", user.get("phone") or ""),
             ("email", "Email", "text", user["email"]),
         ]
 
         def on_save(v):
-            if not v["fullName"].strip():
+            if not v["full_name"].strip():
                 return "Укажите как минимум ФИО."
-            users = store.load_users()
-            for u in users:
-                if u["id"] == user["id"]:
-                    u.update({"fullName": v["fullName"].strip(), "position": v["position"].strip(),
-                              "role": v["role"], "warehouse": v["warehouse"], "status": v["status"],
-                              "phone": v["phone"].strip(), "email": v["email"].strip()})
-                    break
-            store.save_users(users)
+            try:
+                api.client.update_user(
+                    user["id"], full_name=v["full_name"].strip(),
+                    position=v["position"].strip(), role=v["role"],
+                    warehouse_id=v["warehouse_id"], status=v["status"],
+                    phone=v["phone"].strip(), email=v["email"].strip())
+            except ApiError as exc:
+                return exc.title
             return None
 
-        if form_dialog(self, "Редактировать пользователя", fields, on_save, columns=2, width=560):
+        if form_dialog(self, "Редактировать пользователя", fields, on_save,
+                       columns=2, width=560):
             self.nav.go("user", id=user["id"])
 
     def _change_password(self, user):
@@ -196,27 +235,38 @@ class UserDetailPage(Page):
                 return "Пароль должен быть не короче 6 символов."
             if v["password"] != v["repeat"]:
                 return "Пароли не совпадают."
-            store.set_password(user["id"], v["password"])
+            try:
+                api.client.set_password(user["id"], v["password"])
+            except ApiError as exc:
+                return exc.title
             return None
 
-        if form_dialog(self, f'Пароль — {store.short_name(user["fullName"])}',
+        if form_dialog(self, f'Пароль — {fmt.short_name(user["full_name"])}',
                        [("password", "Новый пароль", "text", ""),
                         ("repeat", "Повторите пароль", "text", "")],
                        on_save, submit_label="Сохранить"):
             self.nav.go("user", id=user["id"])
 
     def _toggle_block(self, user):
-        users = store.load_users()
-        for u in users:
-            if u["id"] == user["id"]:
-                u["status"] = "blocked" if u["status"] == "active" else "active"
-                break
-        store.save_users(users)
+        call = (api.client.unblock_user if user["status"] == "blocked"
+                else api.client.block_user)
+        try:
+            call(user["id"])
+        except ApiError as exc:
+            self.show_error(exc)
+            return
         self.nav.go("user", id=user["id"])
 
     def _delete(self, user):
-        if confirm_dialog(self, "Удалить пользователя?",
-                          f'Пользователь «{user["fullName"]}» будет удалён без возможности восстановления.',
-                          confirm_label="Удалить"):
-            store.save_users([u for u in store.load_users() if u["id"] != user["id"]])
-            self.nav.go("users")
+        if not confirm_dialog(
+                self, "Удалить пользователя?",
+                f'Пользователь «{user["full_name"]}» потеряет доступ и исчезнет '
+                f'из списков. Его подписи под заказами и движениями останутся.',
+                confirm_label="Удалить"):
+            return
+        try:
+            api.client.delete_user(user["id"])
+        except ApiError as exc:
+            self.show_error(exc)
+            return
+        self.nav.go("users")

@@ -257,6 +257,9 @@ class TableSection(QWidget):
         self._on_page_change = on_page_change
         self._page_size = max(1, page_size)
         self._page = 1
+        # Серверный режим: страницу присылают готовой, а общее число строк
+        # известно только серверу. None — считаем по своему списку, как раньше.
+        self._server_total = None
         self._auto_rows = auto_rows
         self._auto_busy = False
         self._watching = False
@@ -340,13 +343,30 @@ class TableSection(QWidget):
         self.set_rows(rows)
 
     # ── public ────────────────────────────────────────────────
-    def set_rows(self, rows, pinned=None):
+    def set_rows(self, rows, pinned=None, total=None, keep_page=False):
         """`pinned` rows are always shown above the paged ones and are not
-        part of the pagination (the order builder keeps picked items on top)."""
+        part of the pagination (the order builder keeps picked items on top).
+
+        `total` включает серверный режим: `rows` — уже готовая страница, а
+        сколько строк всего, знает только сервер. `keep_page` нужен там же:
+        после перехода на страницу список подменяется, но номер сбрасывать
+        нельзя, иначе выйдет петля.
+        """
         self._rows = rows
         self._pinned = list(pinned or [])
-        self._page = 1
+        self._server_total = total
+        if not keep_page:
+            self._page = 1
         self._render()
+
+    def page_size(self):
+        """Сколько строк влезает — серверу это нужно как `limit`."""
+        return self._page_size
+
+    def set_empty_text(self, text):
+        """Что показать вместо строк. Список, который не загрузился, объясняет
+        это здесь — а не модальным окном поверх экрана."""
+        self._empty.setText(text)
 
     # ── rows that fit the window ──────────────────────────────
     def showEvent(self, event):
@@ -423,6 +443,7 @@ class TableSection(QWidget):
         fit = max(MIN_ROWS, room // row_h)
 
         self._fitted_for = size_key
+        was_page_size = self._page_size
         self._auto_busy = True
         try:
             if fit != self._page_size:
@@ -443,6 +464,13 @@ class TableSection(QWidget):
                 self._render()
         finally:
             self._auto_busy = False
+
+        # В серверном режиме размер страницы — это `limit` запроса. Окно
+        # изменили, влезает больше строк — надо перезапросить, иначе таблица
+        # покажет старую короткую страницу и решит, что дальше ничего нет.
+        if self._server_total is not None and self._page_size != was_page_size:
+            if self._on_page_change is not None:
+                self._on_page_change(self._page)
 
         # Geometry can settle a pass later than we measure it (a table with
         # taller rows reports its old height here), so the fit above may still
@@ -478,8 +506,11 @@ class TableSection(QWidget):
         QTimer.singleShot(_VERIFY_DELAY_MS, self._verify_fit)
 
     # ── internals ─────────────────────────────────────────────
+    def _row_count(self):
+        return self._server_total if self._server_total is not None else len(self._rows)
+
     def _total_pages(self):
-        return max(1, (len(self._rows) + self._page_size - 1) // self._page_size)
+        return max(1, (self._row_count() + self._page_size - 1) // self._page_size)
 
     def _row_clicked(self, r, _c):
         page_rows = self._current_page_rows()
@@ -487,6 +518,8 @@ class TableSection(QWidget):
             self._on_click(page_rows[r][1])
 
     def _current_page_rows(self):
+        if self._server_total is not None:
+            return self._pinned + self._rows     # страница уже пришла готовой
         start = (self._page - 1) * self._page_size
         return self._pinned + self._rows[start:start + self._page_size]
 
@@ -594,9 +627,10 @@ class TableSection(QWidget):
         show_pager = total_pages > 1
         self._footer.setVisible(show_pager and has_rows)
         if has_rows:
+            count = self._row_count()
             start = (self._page - 1) * self._page_size + 1
-            end = min(self._page * self._page_size, len(self._rows))
-            self._range.setText(f"{start}–{end} из {len(self._rows)}")
+            end = min(self._page * self._page_size, count)
+            self._range.setText(f"{start}–{end} из {count}")
         self._rebuild_pager(total_pages)
 
     def _rebuild_pager(self, total_pages):
@@ -625,9 +659,11 @@ class TableSection(QWidget):
 
     def _go(self, n):
         self._page = max(1, min(n, self._total_pages()))
-        self._render()
+        # Сначала сообщаем: в серверном режиме обработчик успеет подгрузить
+        # страницу и вызвать set_rows, и отрисуется уже она.
         if self._on_page_change is not None:
             self._on_page_change(self._page)
+        self._render()
 
     def current_page(self):
         return self._page

@@ -4,7 +4,9 @@ from datetime import datetime
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from .. import store, theme
+from .. import api, fmt, reference, theme
+from ..api.errors import ApiError
+from ..session import session
 from ..widgets.blueprint import BlueprintFrame
 from ..widgets.common import breadcrumb, h1, h4, svg_pixmap
 from .base import Page
@@ -22,56 +24,44 @@ EVENT_META = {
 }
 
 
-def _fmt_short(s):
-    if not s or s == "—":
-        return ""
-    d, *t = s.split(" ")
-    dd, mm = d.split(".")[0], d.split(".")[1]
-    return f"{dd}.{mm}" + (" " + t[0] if t else "")
-
-
 class HomePage(Page):
     def build(self):
-        orders = store.load_orders()
-        me = store.current_user()
-        role = me["role"] if me else "admin"
-        first_name = "коллега"
-        if me:
-            parts = me["fullName"].split()
-            first_name = parts[1] if len(parts) > 1 else parts[0]
-        role_label = store.role_label(role)
+        user = session.user or {}
+        role = user.get("role", "admin")
+        parts = (user.get("full_name") or "").split()
+        first_name = parts[1] if len(parts) > 1 else (parts[0] if parts else "коллега")
         now = datetime.now()
         today = f"{now.day} {_MONTHS[now.month]} {now.year}"
-
-        ours = [o for o in orders if o["direction"] == "ours"]
-        theirs = [o for o in orders if o["direction"] == "theirs"]
-        in_work = len([o for o in orders if o["status"] in ("created", "processing")])
-        ours_in_work = len([o for o in ours if o["status"] in ("created", "processing")])
-        theirs_in_work = len([o for o in theirs if o["status"] in ("created", "processing")])
-        to_ship = theirs_in_work
-        ship_waiting = len([o for o in theirs if o["status"] == "created"])
-        to_receive = len([o for o in ours if o["status"] == "processing"])
+        owner = (session.warehouse or {}).get("owner", "ООО «Сталкер Групп»")
 
         # ── breadcrumb + greeting ──
         self.add_block(breadcrumb("ProЗапас / Главная"))
         greet = QVBoxLayout()
         greet.setSpacing(4)
         greet.addWidget(h1(f"Здравствуйте, {first_name}"))
-        sub = QLabel(f"{today} · {role_label} · ООО «Сталкер Групп»")
+        sub = QLabel(f"{today} · {reference.role_label(role)} · {owner}")
         sub.setObjectName("muted")
         greet.addWidget(sub)
         self.add_block(greet)
 
+        try:
+            board = api.client.dashboard()
+        except ApiError as exc:
+            self._offline(exc)
+            return
+
         # ── stat cards ──
         stats = [
-            ("Заказы в работе", str(in_work), f"{ours_in_work} исходящих · {theirs_in_work} входящих", "orders"),
-            ("К отгрузке", str(to_ship), f"{ship_waiting} ожидают сборки", "shipping"),
-            ("К приёмке", str(to_receive), "наши заказы в пути", "receiving"),
+            ("Заказы в работе", board["in_work"],
+             f'{board["outgoing_in_work"]} исходящих · {board["incoming_in_work"]} входящих',
+             "orders"),
+            ("К отгрузке", board["to_ship"], "ждут сборки", "shipping"),
+            ("К приёмке", board["to_receive"], "наши заказы в пути", "receiving"),
         ]
         grid = QGridLayout()
         grid.setSpacing(theme.SP6)
         for i, (lbl, val, hint, dest) in enumerate(stats):
-            grid.addWidget(self._stat_card(lbl, val, hint, dest), 0, i)
+            grid.addWidget(self._stat_card(lbl, str(val), hint, dest), 0, i)
             grid.setColumnStretch(i, 1)     # repeat(3, 1fr)
         self.add_block(grid)
 
@@ -80,9 +70,26 @@ class HomePage(Page):
         # only as tall as its own rows, so AlignTop must be per-widget
         panels = QHBoxLayout()
         panels.setSpacing(theme.SP6)
-        panels.addWidget(self._tasks_panel(orders, role), 14, Qt.AlignmentFlag.AlignTop)
-        panels.addWidget(self._events_panel(orders), 10, Qt.AlignmentFlag.AlignTop)
+        panels.addWidget(self._tasks_panel(role), 14, Qt.AlignmentFlag.AlignTop)
+        panels.addWidget(self._events_panel(board.get("events") or []), 10,
+                         Qt.AlignmentFlag.AlignTop)
         self.add_block(panels)
+        self.col.addStretch(1)
+
+    def _offline(self, exc):
+        frame = BlueprintFrame(padding=theme.SP8)
+        fl = frame.content_layout()
+        fl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        t = QLabel(exc.title)
+        t.setStyleSheet(f"font-family:{theme.font_heading()};font-size:20px;")
+        t.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        d = QLabel("Сводка появится, как только сервер ответит. "
+                   "Разделы в меню слева работают независимо.")
+        d.setStyleSheet(f"font-size:13px;color:{theme.NEUTRAL[600]};")
+        d.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        d.setWordWrap(True)
+        fl.addWidget(t); fl.addWidget(d)
+        self.add_block(frame)
         self.col.addStretch(1)
 
     # ── components ─────────────────────────────────────────────
@@ -162,68 +169,90 @@ class HomePage(Page):
         row.mouseReleaseEvent = lambda e: on_click()
         return row
 
-    def _tasks_panel(self, orders, role):
-        def order_sub(o):
-            return f"{len(o.get('positions', []))} поз. · {o.get('counterpartyWarehouse', '—')}"
+    def _tasks_panel(self, role):
+        """Очереди — это те же списки заказов, только отфильтрованные.
 
-        to_process = [o for o in orders if o["status"] == "created"]
-        ship_queue = [o for o in orders if o["direction"] == "theirs" and o["status"] in ("created", "processing")]
-        receive_queue = [o for o in orders if o["direction"] == "ours" and o["status"] in ("processing", "shipped")]
+        Отдельного эндпоинта под задачи нет и не нужно: два запроса дают все три
+        очереди, а фильтр по статусу и складу сервер и так умеет.
+        """
+        try:
+            incoming = api.client.orders("incoming",
+                                         status=["created", "processing"],
+                                         limit=8)["items"]
+            outgoing = api.client.orders("outgoing",
+                                         status=["processing", "shipped"],
+                                         limit=8)["items"]
+        except ApiError as exc:
+            panel, _cl, rows = self._panel("Текущие задачи")
+            fail = QLabel(exc.title)
+            fail.setStyleSheet(f"font-size:13px;color:{theme.NEUTRAL[600]};"
+                               f"padding:{theme.SP3}px 0;")
+            rows.addWidget(fail)
+            return panel
 
-        tasks = []  # (tag, cls, text, sub, dest, params)
+        def sub(o):
+            return f'{o["positions_count"]} поз. · {o["counterparty"]["name"]}'
+
+        to_process = [o for o in incoming if o["status"] == "created"]
+        ship_queue = incoming
+        receive_queue = [o for o in outgoing if o["status"] == "shipped"]
+
+        manage = [("Заказ", "tag-outline", f'Обработать заказ №{o["number"]}',
+                   sub(o), "order", {"id": o["id"]}) for o in to_process]
+        ship = [("Отгрузка", "tag-accent", f'Собрать и отгрузить №{o["number"]}',
+                 sub(o), "shipping", {}) for o in ship_queue]
+        receive = [("Приёмка", "tag-neutral", f'Принять заказ №{o["number"]}',
+                    sub(o), "receiving", {}) for o in receive_queue]
+
         if role == "manager":
-            tasks = [("Заказ", "tag-outline", f"Обработать заказ {o['number']}", order_sub(o), "order", {"id": o["id"]}) for o in to_process]
+            tasks = manage
         elif role == "stockman":
-            tasks = ([("Отгрузка", "tag-accent", f"Собрать и отгрузить {o['number']}", order_sub(o), "shipping", {}) for o in ship_queue]
-                     + [("Приёмка", "tag-neutral", f"Принять поставку {o['number']}", order_sub(o), "receiving", {}) for o in receive_queue])
+            tasks = ship + receive
         else:
+            tasks = []
             seen = set()
-            for tag, cls, txt, sub, dest, params in (
-                [("Заказ", "tag-outline", f"Обработать заказ {o['number']}", order_sub(o), "order", {"id": o["id"]}) for o in to_process]
-                + [("Отгрузка", "tag-accent", f"Собрать и отгрузить {o['number']}", order_sub(o), "shipping", {}) for o in ship_queue]
-                + [("Приёмка", "tag-neutral", f"Принять поставку {o['number']}", order_sub(o), "receiving", {}) for o in receive_queue]
-            ):
-                key = tag + str(params.get("id", txt))
+            for task in manage + ship + receive:
+                key = task[0] + str(task[5].get("id", task[2]))
                 if key not in seen:
                     seen.add(key)
-                    tasks.append((tag, cls, txt, sub, dest, params))
+                    tasks.append(task)
         tasks = tasks[:8]
 
         count = QLabel(str(len(tasks)))
-        count.setStyleSheet(f"font-family:{theme.font_heading()};font-size:16px;color:{theme.ACCENT_RAMP[800]};")
-        panel, cl, rows = self._panel("Текущие задачи", count)
+        count.setStyleSheet(f"font-family:{theme.font_heading()};font-size:16px;"
+                            f"color:{theme.ACCENT_RAMP[800]};")
+        panel, _cl, rows = self._panel("Текущие задачи", count)
 
         if not tasks:
             empty = QLabel("Активных задач нет.")
-            empty.setStyleSheet(f"font-size:13px;color:{theme.NEUTRAL[600]};padding:{theme.SP3}px 0;")
+            empty.setStyleSheet(f"font-size:13px;color:{theme.NEUTRAL[600]};"
+                                f"padding:{theme.SP3}px 0;")
             rows.addWidget(empty)
-        for tag, cls, txt, sub, dest, params in tasks:
-            rows.addWidget(self._row(self._tag(tag, cls), txt, sub, lambda d=dest, p=params: self.nav.go(d, **p)))
+        for tag, cls, txt, hint, dest, params in tasks:
+            rows.addWidget(self._row(self._tag(tag, cls), txt, hint,
+                                     lambda d=dest, p=params: self.nav.go(d, **p)))
         return panel
 
-    def _events_panel(self, orders):
-        ev_all = []
-        for o in orders:
-            for h in o.get("history", []):
-                meta = EVENT_META.get(h["status"])
-                if not meta:
-                    continue
-                ev_all.append((store.parse_ru_datetime(h["dateTime"]), h["dateTime"], o["number"], meta))
-        ev_all.sort(key=lambda e: e[0].timestamp() if e[0] else 0, reverse=True)
-        events = ev_all[:6]
-
-        link = QLabel(f'<a href="#" style="color:{theme.ACCENT_RAMP[700]};font-size:13px;text-decoration:none;">Все заказы</a>')
+    def _events_panel(self, events):
+        link = QLabel(f'<a href="#" style="color:{theme.ACCENT_RAMP[700]};'
+                      f'font-size:13px;text-decoration:none;">Все заказы</a>')
         link.setTextFormat(Qt.TextFormat.RichText)
         link.linkActivated.connect(lambda _: self.nav.go("orders"))
-        panel, cl, rows = self._panel("Последние действия", link)
+        panel, _cl, rows = self._panel("Последние действия", link)
 
         if not events:
             empty = QLabel("Пока нет зафиксированных действий.")
-            empty.setStyleSheet(f"font-size:13px;color:{theme.NEUTRAL[600]};padding:{theme.SP3}px 0;")
+            empty.setStyleSheet(f"font-size:13px;color:{theme.NEUTRAL[600]};"
+                                f"padding:{theme.SP3}px 0;")
             rows.addWidget(empty)
-        for _, raw, number, meta in events:
+        for e in events[:6]:
+            meta = EVENT_META.get(e["status"])
+            if not meta:
+                continue
             text_fn, tag, cls, dest = meta
-            row = self._row(self._tag(tag, cls), text_fn(number), _fmt_short(raw),
-                            lambda d=dest: self.nav.go(d), chevron=False)
-            rows.addWidget(row)
+            when = fmt.parse(e["occurred_at"])
+            short = f"{when.day:02d}.{when.month:02d} {when.hour:02d}:{when.minute:02d}" if when else ""
+            rows.addWidget(self._row(self._tag(tag, cls), text_fn(e["number"]),
+                                     short, lambda d=dest: self.nav.go(d),
+                                     chevron=False))
         return panel

@@ -1,8 +1,9 @@
 """RootWindow — switches between the login screen and the main application."""
 from PyQt6.QtWidgets import QMainWindow, QStackedWidget
 
-from . import store
+from . import reference
 from .pages.login import LoginPage
+from .session import session
 from .shell import MainView
 
 
@@ -23,8 +24,9 @@ class RootWindow(QMainWindow):
         self._stack.addWidget(self._login)
 
         self._main = None
-        auth = store.load_auth()
-        if auth.get("id") and auth.get("remember") and store.current_user():
+        # «Запомнить меня» хранит refresh-токен: сессия поднимается без пароля,
+        # но только если сервер его ещё принимает.
+        if session.resume():
             self._enter_app()
         else:
             self._show_login()
@@ -33,6 +35,9 @@ class RootWindow(QMainWindow):
         self._stack.setCurrentWidget(self._login)
 
     def _enter_app(self):
+        # Справочники — один запрос на всю сессию: их спрашивает почти каждый
+        # экран, и ходить за ними на каждую перерисовку незачем.
+        reference.load(force=True)
         if self._main is not None:
             self._stack.removeWidget(self._main)
             self._main.deleteLater()
@@ -42,6 +47,7 @@ class RootWindow(QMainWindow):
         self._stack.setCurrentWidget(self._main)
 
     def _do_logout(self):
-        store.save_auth(None)
+        session.logout()
+        reference.clear()
         self._login.reset()
         self._show_login()

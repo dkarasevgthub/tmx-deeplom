@@ -2,7 +2,7 @@
 import os
 import sys
 
-from app import devices, theme
+from app import config, devices, theme
 from app.fonts import setup_fonts
 from app.resources import APP_ICON
 from app.service_host import ABSENT, EXTERNAL, host
@@ -34,6 +34,7 @@ def main():
     # Служба устройств поднимается вместе с приложением и гаснет вместе с ним;
     # запущенную до нас оставляем в покое, свою — закрываем сами. Делаем это
     # до окна: ожидание короткое, но показывать ради него пустую раму незачем.
+    print(config.summary())
     state = host.start()
     if state == ABSENT:
         print("служба устройств не запустилась — оборудование недоступно")
