@@ -45,11 +45,6 @@ class Base(DeclarativeBase):
 
 
 # --- Перечисления ---------------------------------------------------------
-class OrderDirection(StrEnum):
-    OURS = "ours"
-    THEIRS = "theirs"
-
-
 class OrderStatus(StrEnum):
     CREATED = "created"
     PROCESSING = "processing"
@@ -122,17 +117,10 @@ class Warehouse(PkMixin, TimestampMixin, SoftDeleteMixin, Base):
 
     code: Mapped[str] = mapped_column(Text, unique=True)
     name: Mapped[str] = mapped_column(Text, unique=True)
+    # Чей склад — в приёмке показывается рядом с отправителем.
+    owner: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     responsible_user_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("user_account.id", ondelete="SET NULL", use_alter=True), nullable=True)
-    is_own: Mapped[bool] = mapped_column(Boolean, server_default="false")
-    is_active: Mapped[bool] = mapped_column(Boolean, server_default="true")
-
-
-class Supplier(PkMixin, TimestampMixin, SoftDeleteMixin, Base):
-    __tablename__ = "supplier"
-
-    name: Mapped[str] = mapped_column(Text, unique=True)
-    inn: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, server_default="true")
 
 
@@ -218,19 +206,6 @@ class RefreshToken(PkMixin, Base):
     __table_args__ = (Index("ix_refresh_token_user", "user_id"),)
 
 
-class LoginAttempt(PkMixin, Base):
-    """Журнал попыток входа — по нему тормозится перебор пароля."""
-    __tablename__ = "login_attempt"
-
-    ip_address: Mapped[str] = mapped_column(Text)
-    login: Mapped[str] = mapped_column(Text)
-    success: Mapped[bool] = mapped_column(Boolean)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now())
-
-    __table_args__ = (Index("ix_login_attempt_ip", "ip_address", "created_at"),)
-
-
 # --- Остатки и движения ---------------------------------------------------
 class StockBalance(VersionMixin, Base):
     __tablename__ = "stock_balance"
@@ -282,33 +257,38 @@ class StockMovement(PkMixin, Base):
 
 
 # --- Заказы ---------------------------------------------------------------
-order_number_ours_seq = Sequence("order_number_ours_seq", start=2001)
-order_number_theirs_seq = Sequence("order_number_theirs_seq", start=3001)
+order_number_seq = Sequence("order_number_seq", start=2001)
 
 
 class Order(PkMixin, TimestampMixin, VersionMixin, Base):
+    """Перемещение товара между двумя складами.
+
+    Направление не хранится: для склада-получателя заказ исходящий, для
+    склада-отправителя — входящий. Одна запись, два взгляда.
+    """
     __tablename__ = "order"        # зарезервированное слово, SQLAlchemy экранирует
 
     number: Mapped[str] = mapped_column(Text, unique=True)
-    direction: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, server_default=OrderStatus.CREATED)
-    counterparty_warehouse_id: Mapped[int] = mapped_column(
+    from_warehouse_id: Mapped[int] = mapped_column(
+        ForeignKey("warehouse.id", ondelete="RESTRICT"))
+    to_warehouse_id: Mapped[int] = mapped_column(
         ForeignKey("warehouse.id", ondelete="RESTRICT"))
     responsible_user_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("user_account.id", ondelete="SET NULL"), nullable=True)
     comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    decline_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    cancel_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Одно поле на отказ и на отмену: одновременно они не случаются.
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     shipped_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True)
     accepted_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
-        check_enum("direction", OrderDirection, "direction"),
         check_enum("status", OrderStatus, "status"),
-        Index("ix_order_list", "direction", "status", "created_at"),
-        Index("ix_order_warehouse", "counterparty_warehouse_id"),
+        CheckConstraint("from_warehouse_id <> to_warehouse_id", name="different_warehouses"),
+        Index("ix_order_from", "from_warehouse_id", "status", "created_at"),
+        Index("ix_order_to", "to_warehouse_id", "status", "created_at"),
         Index("ix_order_number_prefix", "number", postgresql_ops={"number": "text_pattern_ops"}),
     )
 
@@ -364,8 +344,12 @@ class Shipment(PkMixin, TimestampMixin, VersionMixin, Base):
 
 
 class ShipmentBox(PkMixin, Base):
-    """Коробка создаётся до печати: зажевало ленту — этикетка перепечатывается,
-    а данные на месте. Штрихкод выдаёт сервер."""
+    """Коробка со штрихкодом от сервера.
+
+    Отметки о печати нет: этикетка печатается сразу после создания, и если не
+    вышла — клиент удаляет коробку. Значит существующая коробка всегда
+    напечатана, а перепечать доступна из интерфейса в любой момент.
+    """
     __tablename__ = "shipment_box"
 
     shipment_id: Mapped[int] = mapped_column(
@@ -375,12 +359,19 @@ class ShipmentBox(PkMixin, Base):
         ForeignKey("catalog_item.id", ondelete="RESTRICT"))
     qty: Mapped[float] = mapped_column(QTY)
     weight: Mapped[float] = mapped_column(WEIGHT)
-    printed_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True)
     user_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("user_account.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now())
+
+    # Результат приёмки пишется на саму коробку: получатель сканирует ту же
+    # коробку, что упаковал отправитель. Пусто после завершения приёмки —
+    # значит коробка не доехала.
+    received_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    actual_weight: Mapped[Optional[float]] = mapped_column(WEIGHT, nullable=True)
+    received_by_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("user_account.id", ondelete="SET NULL"), nullable=True)
 
     __table_args__ = (
         CheckConstraint("qty > 0", name="qty"),
@@ -391,73 +382,24 @@ class ShipmentBox(PkMixin, Base):
 
 
 # --- Приёмка --------------------------------------------------------------
-class ReceiptBatch(PkMixin, TimestampMixin, VersionMixin, Base):
-    __tablename__ = "receipt_batch"
+class Receipt(PkMixin, TimestampMixin, VersionMixin, Base):
+    """Документ получателя. Ожидаемые коробки берутся из отгрузки отправителя,
+    поэтому своих позиций и сканов у приёмки нет."""
+    __tablename__ = "receipt"
 
-    number: Mapped[str] = mapped_column(Text, unique=True)
-    supplier_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("supplier.id", ondelete="RESTRICT"), nullable=True)
-    order_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("order.id", ondelete="SET NULL"), nullable=True)
+    order_id: Mapped[int] = mapped_column(
+        ForeignKey("order.id", ondelete="CASCADE"), unique=True)
     warehouse_id: Mapped[int] = mapped_column(
         ForeignKey("warehouse.id", ondelete="RESTRICT"))
     status: Mapped[str] = mapped_column(Text, server_default=DocStatus.WAITING)
     responsible_user_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("user_account.id", ondelete="SET NULL"), nullable=True)
-    ship_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True)
     accepted_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         check_enum("status", DocStatus, "status"),
-        CheckConstraint("supplier_id IS NOT NULL OR order_id IS NOT NULL",
-                        name="supplier_or_order"),
-        Index("ix_receipt_batch_list", "status", "created_at"),
-    )
-
-
-class ReceiptBatchPosition(PkMixin, Base):
-    """Ожидание и факт по позиции. Итог приёмки переживает партию, сканы нет."""
-    __tablename__ = "receipt_batch_position"
-
-    batch_id: Mapped[int] = mapped_column(
-        ForeignKey("receipt_batch.id", ondelete="CASCADE"))
-    item_id: Mapped[int] = mapped_column(
-        ForeignKey("catalog_item.id", ondelete="RESTRICT"))
-    boxes: Mapped[int] = mapped_column(Integer)
-    box_weight: Mapped[float] = mapped_column(WEIGHT)
-    accepted_boxes: Mapped[int] = mapped_column(Integer, server_default="0")
-    missing_boxes: Mapped[int] = mapped_column(Integer, server_default="0")
-    actual_weight: Mapped[Optional[float]] = mapped_column(WEIGHT, nullable=True)
-
-    __table_args__ = (
-        UniqueConstraint("batch_id", "item_id"),
-        CheckConstraint("boxes > 0", name="boxes"),
-        CheckConstraint("box_weight > 0", name="box_weight"),
-        CheckConstraint("accepted_boxes >= 0", name="accepted_boxes"),
-        CheckConstraint("missing_boxes >= 0", name="missing_boxes"),
-    )
-
-
-class ReceiptScan(PkMixin, Base):
-    """Рабочая таблица: живёт, пока партия в работе, при завершении сворачивается."""
-    __tablename__ = "receipt_scan"
-
-    batch_id: Mapped[int] = mapped_column(
-        ForeignKey("receipt_batch.id", ondelete="CASCADE"))
-    barcode: Mapped[str] = mapped_column(Text)
-    item_id: Mapped[int] = mapped_column(
-        ForeignKey("catalog_item.id", ondelete="RESTRICT"))
-    actual_weight: Mapped[Optional[float]] = mapped_column(WEIGHT, nullable=True)
-    is_missing: Mapped[bool] = mapped_column(Boolean, server_default="false")
-    user_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("user_account.id", ondelete="SET NULL"), nullable=True)
-    scanned_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now())
-
-    __table_args__ = (
-        UniqueConstraint("batch_id", "barcode"),
+        Index("ix_receipt_list", "status", "created_at"),
     )
 
 

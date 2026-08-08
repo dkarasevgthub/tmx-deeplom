@@ -36,11 +36,12 @@ PERMISSIONS = {
     Section.USERS:     {"manager": (False, False), "stockman": (False, False), "admin": (True, True)},
 }
 
+# (код, название, чей)
 WAREHOUSES = [
-    ("128", "Склад №1", True),
-    ("129", "Склад №3", False),
-    ("130", "Склад №4", False),
-    ("131", "Центральный склад", False),
+    ("128", "Склад №1", "ООО «Сталкер Групп»"),
+    ("129", "Склад №3", "ООО «Сталкер Групп»"),
+    ("130", "Склад №4", "ООО «Сталкер Групп»"),
+    ("131", "Центральный склад", "ООО «Сталкер Групп»"),
 ]
 
 
@@ -70,9 +71,9 @@ def seed(session: Session) -> None:
 
     known = {w.code for w in session.scalars(select(Warehouse))}
     new_warehouses = 0
-    for code, name, is_own in WAREHOUSES:
+    for code, name, owner in WAREHOUSES:
         if code not in known:
-            session.add(Warehouse(code=code, name=name, is_own=is_own))
+            session.add(Warehouse(code=code, name=name, owner=owner))
             new_warehouses += 1
     session.flush()
     print(f"склады: добавлено {new_warehouses}")
@@ -80,7 +81,9 @@ def seed(session: Session) -> None:
     admin = session.scalar(
         select(UserAccount).where(UserAccount.login == ADMIN_LOGIN))
     if admin is None:
-        own = session.scalar(select(Warehouse).where(Warehouse.is_own.is_(True)))
+        # Каждый пользователь привязан к одному складу; администратора сажаем
+        # на первый.
+        own = session.scalar(select(Warehouse).order_by(Warehouse.code))
         session.add(UserAccount(
             full_name="Администратор системы",
             login=ADMIN_LOGIN,
