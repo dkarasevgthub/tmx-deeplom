@@ -8,6 +8,7 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+tests
 
 # Среды разработки
 .idea/
@@ -36,3 +37,7 @@ pgdata/
 # OS
 .DS_Store
 Thumbs.db
+
+# Секреты окружения
+.env
+backend/.env

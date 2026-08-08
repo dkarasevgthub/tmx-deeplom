@@ -39,7 +39,6 @@ from ._ui import (
 )
 from .base import BlockColumn, Page
 
-MAX_BOX_WEIGHT = 25.0
 PANEL_PAGE_SIZE = 8      # rows per page in the two detail panels
 # packing progress lives in the store; this is a per-session cache of it
 _PACK = {}
@@ -656,7 +655,7 @@ class ShippingPage(Page):
             weight = self._live[0]
         else:
             # Весов нет (или поток ещё ничего не дал) — оператор читает табло сам
-            weight = weight_dialog(self, hint=f"не более {MAX_BOX_WEIGHT:.0f} кг на коробку")
+            weight = weight_dialog(self)
             if weight is None:
                 return
         computed = max(1, round(weight / uw))
