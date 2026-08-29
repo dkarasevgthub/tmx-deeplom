@@ -11,7 +11,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .. import store, theme
+from .. import api, fmt, reference, theme
+from ..api.errors import ApiError
 from ..widgets.blueprint import BlueprintFrame
 from ..widgets.combo import SearchableComboBox
 from ..widgets.common import breadcrumb, button, icon_button
@@ -21,8 +22,13 @@ from ..widgets.table import TableSection, transparent_cell
 from ._ui import filter_action, header_row, labeled_field
 from .base import Page
 
-ROLE_OPTIONS = [("all", "Все роли"), ("manager", "Менеджер"), ("stockman", "Кладовщик"), ("admin", "Администратор")]
-STATUS_OPTIONS = [("all", "Все статусы"), ("active", "Активен"), ("blocked", "Заблокирован")]
+STATUS_OPTIONS = [("all", "Все статусы"), ("active", "Активен"),
+                  ("blocked", "Заблокирован")]
+
+
+def _initials(full_name):
+    parts = (full_name or "").strip().split()
+    return "".join(p[0].upper() for p in parts[:2]) or "—"
 
 
 def _avatar(text, size=32, font=13):
@@ -43,7 +49,7 @@ def _employee_cell(full_name, email):
     lay = QHBoxLayout(w)
     lay.setContentsMargins(4, 4, 4, 4)
     lay.setSpacing(theme.SP3)
-    lay.addWidget(_avatar(store.initials(full_name)))
+    lay.addWidget(_avatar(_initials(full_name)))
     box = QVBoxLayout()
     box.setSpacing(0)
     n = QLabel(full_name)
@@ -68,7 +74,8 @@ class UsersPage(Page):
         self.add_block(breadcrumb("ProЗапас / Пользователи"))
         self._add_btn = button("+ Добавить пользователя", "primary")
         self._add_btn.clicked.connect(self._open_add)
-        self.add_block(header_row("Пользователи", "Сотрудники, их роли и права доступа", self._add_btn))
+        self.add_block(header_row("Пользователи",
+                                  "Сотрудники, их роли и права доступа", self._add_btn))
 
         tabs = QHBoxLayout()
         tabs.setSpacing(theme.SP2)
@@ -86,6 +93,10 @@ class UsersPage(Page):
         self.add_block(self._body)
         self.col.addStretch(1)
         self._render_body()
+
+    def _role_options(self):
+        return [("all", "Все роли")] + [(r["code"], r["label"])
+                                        for r in reference.roles()]
 
     # ── tabs ──
     def _set_tab(self, tab):
@@ -131,10 +142,11 @@ class UsersPage(Page):
         self._search_input = QLineEdit()
         self._search_input.setPlaceholderText("ФИО, телефон или email")
         self._search_input.textChanged.connect(self._on_search)
-        self._role_input = self._combo(ROLE_OPTIONS)
+        self._role_input = self._combo(self._role_options())
         self._status_input = self._combo(STATUS_OPTIONS)
         self._warehouse_input = self._combo(
-            [("all", "Все склады")] + [(w, w) for w in store.warehouses()],
+            [("all", "Все склады")] + [(w["id"], w["name"])
+                                       for w in reference.warehouses()],
             searchable="Поиск склада")
 
         filters = FlowRow(h_spacing=theme.SP4, v_spacing=theme.SP3)
@@ -148,13 +160,16 @@ class UsersPage(Page):
         self._body.addWidget(filters)
 
         self._table = TableSection(
-            headers=["Сотрудник", "Роль", "Должность", "Склад", "Телефон", "Статус", "Последний вход"],
+            headers=["Сотрудник", "Роль", "Должность", "Склад", "Телефон",
+                     "Статус", "Последний вход"],
             widths=[260, 120, 0, 150, 150, 116, 150],
-            rows=self._user_rows(), on_row_click=lambda uid: self.nav.go("user", id=uid),
+            rows=[], on_row_click=lambda uid: self.nav.go("user", id=uid),
             page_size=12, auto_rows=True,
+            on_page_change=self._refresh,       # страницу подгружает сервер
         )
         self._table._table.verticalHeader().setDefaultSectionSize(46)
         self._body.addWidget(self._table)
+        self._refresh()
 
     def _combo(self, options, searchable=None):
         c = SearchableComboBox(searchable) if searchable else QComboBox()
@@ -163,57 +178,70 @@ class UsersPage(Page):
         c.currentIndexChanged.connect(self._on_filter)
         return c
 
-    def _user_rows(self):
-        q = self._search.strip().lower()
+    def _refresh(self, page: int = 1):
+        size = self._table.page_size()
+        try:
+            payload = api.client.users(
+                q=self._search.strip() or None,
+                role=None if self._role == "all" else self._role,
+                status=None if self._status == "all" else self._status,
+                warehouse_id=None if self._warehouse == "all" else self._warehouse,
+                limit=size, offset=(page - 1) * size)
+        except ApiError as exc:
+            self._table.set_empty_text(exc.title)
+            self._table.set_rows([], total=0, keep_page=True)
+            return
+
+        self._table.set_empty_text("Ничего не найдено по этим условиям")
         rows = []
-        for u in store.load_users():
-            if q and not (q in u["fullName"].lower() or q in u["email"].lower() or q in u["phone"].lower()):
-                continue
-            if self._role != "all" and u["role"] != self._role:
-                continue
-            if self._status != "all" and u["status"] != self._status:
-                continue
-            if self._warehouse != "all" and u["warehouse"] != self._warehouse:
-                continue
+        for u in payload["items"]:
             rl, rc, rb = theme.role_meta(u["role"])
             sl, sc, sb = theme.user_status_meta(u["status"])
-            fn, em = u["fullName"], u["email"]
+            fn, em = u["full_name"], u["email"]
             rows.append((
                 [("w", lambda fn=fn, em=em: _employee_cell(fn, em)),
                  ("tag", rl, rc, rb),
-                 ("m", u["position"]),
-                 ("m", u["warehouse"]),
-                 ("m", u["phone"]),
+                 ("m", u.get("position") or "—"),
+                 ("m", (u.get("warehouse") or {}).get("name", "—")),
+                 ("m", u.get("phone") or "—"),
                  ("tag", sl, sc, sb),
-                 ("m", u["lastLogin"])],
+                 ("m", fmt.datetime_(u.get("last_login_at")))],
                 u["id"],
             ))
-        return rows
+        self._table.set_rows(rows, total=payload["total"], keep_page=True)
 
     def _on_search(self, text):
         self._search = text
-        self._table.set_rows(self._user_rows())
+        self._refresh()
 
     def _on_filter(self, _):
         self._role = self._role_input.currentData()
         self._status = self._status_input.currentData()
         self._warehouse = self._warehouse_input.currentData()
-        self._table.set_rows(self._user_rows())
+        self._refresh()
 
     def _reset(self):
-        self._search = ""; self._role = "all"; self._status = "all"; self._warehouse = "all"
+        self._search = ""; self._role = "all"
+        self._status = "all"; self._warehouse = "all"
         for c in (self._role_input, self._status_input, self._warehouse_input):
             c.blockSignals(True); c.setCurrentIndex(0); c.blockSignals(False)
-        self._search_input.blockSignals(True); self._search_input.clear(); self._search_input.blockSignals(False)
-        self._table.set_rows(self._user_rows())
+        self._search_input.blockSignals(True)
+        self._search_input.clear()
+        self._search_input.blockSignals(False)
+        self._refresh()
 
     def _open_add(self):
+        warehouses = reference.warehouses()
         fields = [
-            ("fullName", "ФИО", "text", ""),
+            ("full_name", "ФИО", "text", ""),
             ("position", "Должность", "text", ""),
-            ("role", "Роль", "select", "manager", [("manager", "Менеджер"), ("stockman", "Кладовщик"), ("admin", "Администратор")]),
-            ("warehouse", "Склад", "search-select", "Склад №1", [(w, w) for w in store.warehouses()]),
-            ("status", "Статус", "select", "active", [("active", "Активен"), ("blocked", "Заблокирован")]),
+            ("role", "Роль", "select", "manager",
+             [(r["code"], r["label"]) for r in reference.roles()]),
+            ("warehouse_id", "Склад", "search-select",
+             warehouses[0]["id"] if warehouses else None,
+             [(w["id"], w["name"]) for w in warehouses]),
+            ("status", "Статус", "select", "active",
+             [("active", "Активен"), ("blocked", "Заблокирован")]),
             ("phone", "Телефон", "text", ""),
             ("email", "Email", "text", ""),
             ("login", "Логин", "text", ""),
@@ -221,39 +249,45 @@ class UsersPage(Page):
         ]
 
         def on_save(v):
-            if not v["fullName"].strip():
+            if not v["full_name"].strip():
                 return "Укажите как минимум ФИО."
             login = v["login"].strip().lower() or v["email"].split("@")[0].strip().lower()
             if not login:
                 return "Укажите логин или почту — по ним сотрудник входит в систему."
-            if store.user_by_login(login):
-                return f"Логин «{login}» уже занят."
-            password = v["password"]
-            if len(password) < 6:
+            if len(v["password"]) < 6:
                 return "Пароль должен быть не короче 6 символов."
-            users = store.load_users()
-            next_id = max((u["id"] for u in users), default=0) + 1
-            from datetime import datetime
-            today = datetime.now().strftime("%d.%m.%Y")
-            users.append({
-                "id": next_id, "fullName": v["fullName"].strip(), "role": v["role"],
-                "warehouse": v["warehouse"], "position": v["position"].strip(), "status": v["status"],
-                "phone": v["phone"].strip(), "email": v["email"].strip(),
-                "login": login, "passwordHash": store.hash_password(password),
-                "hireDate": today, "lastLogin": "—",
-            })
-            store.save_users(users)
-            self._table.set_rows(self._user_rows())
+            try:
+                # Занятость логина и почты проверяет сервер: только у него есть
+                # весь список, включая тех, кого этот экран сейчас не показывает.
+                api.client.create_user(
+                    full_name=v["full_name"].strip(), login=login,
+                    email=v["email"].strip(), password=v["password"],
+                    role=v["role"], warehouse_id=v["warehouse_id"],
+                    position=v["position"].strip(), phone=v["phone"].strip(),
+                    status=v["status"])
+            except ApiError as exc:
+                return exc.title
+            self._refresh()
             return None
 
-        form_dialog(self, "Новый пользователь", fields, on_save, submit_label="Добавить", columns=2, width=560)
+        form_dialog(self, "Новый пользователь", fields, on_save,
+                    submit_label="Добавить", columns=2, width=560)
 
     # ── roles tab ──
     def _render_roles(self):
-        note = QLabel("Отметьте, что каждая роль может видеть и редактировать по разделам. Изменения сохраняются автоматически.")
+        note = QLabel("Отметьте, что каждая роль может видеть и редактировать "
+                      "по разделам. Изменения сохраняются автоматически.")
         note.setStyleSheet(f"font-size:13px;color:{theme.NEUTRAL[600]};")
         note.setWordWrap(True)
         self._body.addWidget(note)
+
+        try:
+            self._perms = api.client.permissions()
+        except ApiError as exc:
+            fail = QLabel(exc.title)
+            fail.setStyleSheet(f"font-size:13px;color:{theme.DANGER};")
+            self._body.addWidget(fail)
+            return
 
         frame = BlueprintFrame(padding=theme.SP4)
         fl = frame.content_layout()
@@ -261,42 +295,63 @@ class UsersPage(Page):
         grid.setHorizontalSpacing(theme.SP6)
         grid.setVerticalSpacing(theme.SP3)
 
-        role_titles = [("manager", "Менеджер"), ("stockman", "Кладовщик"), ("admin", "Администратор")]
-        headers = ["Раздел"] + [t for _, t in role_titles]
-        for c, htext in enumerate(headers):
+        roles = reference.roles()
+        for c, htext in enumerate(["Раздел"] + [r["label"] for r in roles]):
             h = QLabel(htext)
-            h.setStyleSheet(f"font-size:11px;color:{theme.NEUTRAL[600]};text-transform:uppercase;font-weight:600;")
+            h.setStyleSheet(f"font-size:11px;color:{theme.NEUTRAL[600]};"
+                            f"text-transform:uppercase;font-weight:600;")
             grid.addWidget(h, 0, c)
 
-        perms = store.load_perms()
-        for r, (sid, slabel) in enumerate(store.sections(), start=1):
-            sl = QLabel(slabel)
+        for r, code in enumerate(reference.sections(), start=1):
+            sl = QLabel(reference.section_label(code))
             sl.setStyleSheet("font-weight:600;")
             grid.addWidget(sl, r, 0)
-            for c, (role, _t) in enumerate(role_titles, start=1):
-                grid.addWidget(self._perm_cell(perms, role, sid), r, c)
+            for c, role in enumerate(roles, start=1):
+                grid.addWidget(self._perm_cell(role["code"], code), r, c)
         fl.addLayout(grid)
         self._body.addWidget(frame)
 
-    def _perm_cell(self, perms, role, sid):
+    def _entry(self, role, section):
+        for p in self._perms:
+            if p["role"] == role and p["section"] == section:
+                return p
+        return {"role": role, "section": section,
+                "can_view": False, "can_edit": False}
+
+    def _perm_cell(self, role, section):
         cell = QWidget()
         lay = QHBoxLayout(cell)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(theme.SP4)
         view = QCheckBox("Просмотр")
         edit = QCheckBox("Ред.")
-        view.setChecked(perms[role][sid]["view"])
-        edit.setChecked(perms[role][sid]["edit"])
+        current = self._entry(role, section)
+        view.setChecked(current["can_view"])
+        edit.setChecked(current["can_edit"])
 
         def toggle(_=None):
-            p = store.load_perms()
-            p[role][sid]["view"] = view.isChecked()
-            p[role][sid]["edit"] = edit.isChecked()
+            # Редактирование без просмотра бессмысленно — галочки тянут друг друга.
             if edit.isChecked() and not view.isChecked():
-                view.setChecked(True); p[role][sid]["view"] = True
+                view.setChecked(True)
+                return                  # setChecked вызовет toggle заново
             if not view.isChecked() and edit.isChecked():
-                edit.setChecked(False); p[role][sid]["edit"] = False
-            store.save_perms(p)
+                edit.setChecked(False)
+                return
+            entry = self._entry(role, section)
+            was = (entry["can_view"], entry["can_edit"])
+            entry["can_view"] = view.isChecked()
+            entry["can_edit"] = edit.isChecked()
+            if entry not in self._perms:
+                self._perms.append(entry)
+            try:
+                # Матрица уходит целиком: полтора десятка строк, а частичное
+                # обновление потребовало бы отдельного ключа на каждую клетку.
+                self._perms = api.client.save_permissions(self._perms)
+            except ApiError as exc:
+                entry["can_view"], entry["can_edit"] = was
+                for box, value in ((view, was[0]), (edit, was[1])):
+                    box.blockSignals(True); box.setChecked(value); box.blockSignals(False)
+                self.show_error(exc)
 
         view.toggled.connect(toggle)
         edit.toggled.connect(toggle)

@@ -1,5 +1,6 @@
 up:                       ## поднять базу и накатить миграции
 	docker compose up -d db
+	docker compose up -d api
 	docker compose run --rm migrate upgrade head
 
 down:                     ## остановить всё, данные сохранить
@@ -23,7 +24,7 @@ history:                  ## все ревизии
 check:                    ## схема разошлась с моделями?
 	docker compose run --rm migrate check
 
-seed:                     ## начальные данные
+seed:                     ## наполнить базу для тестовых прогонов
 	docker compose run --rm seed
 
 reset:                    ## снести базу целиком и собрать заново

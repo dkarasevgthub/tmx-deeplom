@@ -1,10 +1,10 @@
 """Заказ — order detail with status, parties, positions, history, actions."""
-import random
-
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
 
-from .. import store, theme
+from .. import api, fmt, theme
+from ..api.errors import ApiError, Conflict
+from ..session import session
 from ..widgets.blueprint import BlueprintFrame
 from ..widgets.common import Tag, button, h1, h4
 from ..widgets.dialog import form_dialog
@@ -12,9 +12,11 @@ from ..widgets.flow import FlowRow
 from ..widgets.table import TableSection
 from .base import Page
 
-OUR_WAREHOUSE = "Склад №2"
-OUR_RESPONSIBLE = "Кузнецов И.А."
-PICKERS = ["Смирнов А.П.", "Ковалёв Д.С.", "Егорова Н.И."]
+
+def _who(warehouse):
+    """Ответственный за склад приходит вместе со складом."""
+    person = (warehouse or {}).get("responsible")
+    return fmt.short_name(person["name"]) if person else "—"
 
 
 def _info_cell(kicker, value):
@@ -45,7 +47,12 @@ def _info_panel(cells):
 class OrderDetailPage(Page):
     def build(self):
         oid = self.params.get("id")
-        order = store.order_by_id(oid)
+        try:
+            order = api.client.order(oid)
+        except ApiError:
+            # Чужой заказ сервер отдаёт как «не найдено»: существование
+            # документа другого склада — тоже сведения.
+            order = None
 
         crumb = QLabel(
             f'<a href="#home" style="color:{theme.NEUTRAL[600]};text-decoration:none;">ProЗапас</a> / '
@@ -61,6 +68,10 @@ class OrderDetailPage(Page):
             self._not_found()
             return
 
+        try:
+            self._history = api.client.order_history(oid)
+        except ApiError:
+            self._history = []
         self._render(order)
 
     def _not_found(self):
@@ -79,9 +90,11 @@ class OrderDetailPage(Page):
         self.col.addStretch(1)
 
     def _render(self, order):
-        is_ours = order["direction"] == "ours"
+        # Направления в заказе нет: он один на два склада, и каждый видит своё.
+        is_ours = order["to_warehouse"]["id"] == session.warehouse_id
         is_theirs = not is_ours
         status = order["status"]
+        self._order = order
 
         # ── header + actions ──
         head = QHBoxLayout()
@@ -100,9 +113,7 @@ class OrderDetailPage(Page):
             decline = button("Отклонить", "secondary")
             decline.clicked.connect(lambda: self._decline(order))
             accept = button("Принять заказ", "primary")
-            accept.clicked.connect(lambda: self._transition(order, "processing", {
-                "packedIndexes": [], "pickStartedAt": store.format_now(),
-                "pickResponsible": random.choice(PICKERS)}))
+            accept.clicked.connect(lambda: self._accept(order))
             head.addWidget(decline, 0, Qt.AlignmentFlag.AlignTop)
             head.addWidget(accept, 0, Qt.AlignmentFlag.AlignTop)
         elif is_ours and status in ("created", "processing"):
@@ -120,27 +131,25 @@ class OrderDetailPage(Page):
         sv.addWidget(sk); sv.addWidget(Tag(label, color, bg))
         srow.add(stat_box)
         srow.add(_info_cell("Позиций", len(order["positions"])))
-        srow.add(_info_cell("Дата создания", order["createdDateTime"]))
-        srow.add(_info_cell("Дата отгрузки", order["shipDateTime"]))
-        srow.add(_info_cell("Дата приёмки", order.get("acceptedAt") or "—"))
+        srow.add(_info_cell("Дата создания", fmt.datetime_(order["created_at"])))
+        srow.add(_info_cell("Дата отгрузки", fmt.datetime_(order.get("shipped_at"))))
+        srow.add(_info_cell("Дата приёмки", fmt.datetime_(order.get("accepted_at"))))
         status_frame.content_layout().addWidget(srow)
         self.add_block(status_frame)
 
         # ── parties panel ──
-        sender_wh = order["counterpartyWarehouse"] if is_ours else OUR_WAREHOUSE
-        sender_resp = order["counterpartyResponsible"] if is_ours else order["responsible"]
-        receiver_wh = OUR_WAREHOUSE if is_ours else order["counterpartyWarehouse"]
-        receiver_resp = order["responsible"] if is_ours else order["counterpartyResponsible"]
+        sender, receiver = order["from_warehouse"], order["to_warehouse"]
         self.add_block(_info_panel([
-            ("Получатель", receiver_wh),
-            ("Ответственный-получатель", receiver_resp),
-            ("Отправитель", sender_wh),
-            ("Ответственный-отправитель", sender_resp),
+            ("Получатель", receiver["name"]),
+            ("Ответственный-получатель", _who(receiver)),
+            ("Отправитель", sender["name"]),
+            ("Ответственный-отправитель", _who(sender)),
         ]))
 
         # ── picking progress (theirs + processing) or a contextual note ──
-        if status == "processing" and is_theirs:
-            self.add_block(self._progress_panel(order))
+        progress = self._progress_panel(order) if (status == "processing" and is_theirs) else None
+        if progress is not None:
+            self.add_block(progress)
         else:
             note = self._context_note(order, is_ours, is_theirs)
             if note:
@@ -154,20 +163,26 @@ class OrderDetailPage(Page):
         self.add_block(two)
         self.col.addStretch(1)
 
+    #: Статус отгрузки на языке экрана.
+    _SHIPMENT_LABEL = {"waiting": "Ожидает", "progress": "В работе", "done": "Отгружен"}
+
     def _progress_panel(self, order):
-        """Shown while our warehouse is picking an incoming order."""
-        packed = len(order.get("packedIndexes") or [])
-        total = len(order["positions"])
-        if packed == 0:
-            shipment = "Ожидает"
-        elif packed < total:
-            shipment = "В работе"
-        else:
-            shipment = "Отгружен"
+        """Ход сборки, пока наш склад собирает входящий заказ.
+
+        Данные лежат в отгрузке — отдельном документе отправителя, поэтому за
+        ними идёт свой запрос.
+        """
+        try:
+            shipment = api.client.shipment(order["id"])
+        except ApiError:
+            return None
+        packed = shipment.get("positions_packed", 0)
+        total = shipment.get("positions_total", len(order["positions"]))
+        who = shipment.get("responsible") or {}
         return _info_panel([
-            ("Статус отгрузки", shipment),
-            ("Начало сборки", order.get("pickStartedAt") or "—"),
-            ("Ответственный", order.get("pickResponsible") or "—"),
+            ("Статус отгрузки", self._SHIPMENT_LABEL.get(shipment.get("status"), "—")),
+            ("Начало сборки", fmt.datetime_(shipment.get("created_at"))),
+            ("Ответственный", fmt.short_name(who.get("name", "")) if who else "—"),
             ("Прогресс сборки", f"{packed} из {total} позиций"),
         ])
 
@@ -189,13 +204,14 @@ class OrderDetailPage(Page):
     def _context_note(self, order, is_ours, is_theirs):
         status = order["status"]
         if status == "declined":
-            return self._outcome_note("Заказ отклонён", order.get("declineReason"))
+            return self._outcome_note("Заказ отклонён", order.get("reason"))
         if status == "cancelled":
-            return self._outcome_note("Заказ отменён", order.get("cancelReason"))
+            return self._outcome_note("Заказ отменён", order.get("reason"))
 
         text = None
         if status == "shipped" and is_theirs:
-            text = f'Заказ отгружен получателю — {order["counterpartyWarehouse"]}. Ожидает подтверждения приёмки на их стороне.'
+            text = (f'Заказ отгружен получателю — {order["to_warehouse"]["name"]}. '
+                    'Ожидает подтверждения приёмки на их стороне.')
         elif status == "created" and is_ours:
             text = "Заявка отправлена и ожидает обработки на складе-отправителе."
         elif status == "processing" and is_ours:
@@ -224,8 +240,8 @@ class OrderDetailPage(Page):
         head.addWidget(self._pos_search, 0, Qt.AlignmentFlag.AlignBottom)
         fl.addLayout(head)
 
-        # positions store an article; name and unit come from the catalogue
-        self._positions = store.order_positions(order)
+        # позиции приходят с наименованием и единицей: сервер их уже подставил
+        self._positions = order["positions"]
         # framed=False: this panel is already a blueprint frame
         self._pos_table = TableSection(
             headers=["Артикул", "Наименование", "Ед. изм.", "Кол-во"],
@@ -256,7 +272,7 @@ class OrderDetailPage(Page):
         rows = QVBoxLayout()
         rows.setContentsMargins(0, 0, 0, 0)
         rows.setSpacing(0)
-        for h in order["history"]:
+        for h in self._history:
             label, color, bg = theme.status_meta(h["status"])
             row = QWidget()
             row.setObjectName("histrow")
@@ -271,7 +287,7 @@ class OrderDetailPage(Page):
             rl.setSpacing(theme.SP3)
             rl.addWidget(Tag(label, color, bg))
             rl.addStretch(1)
-            dt = QLabel(h["dateTime"])
+            dt = QLabel(fmt.datetime_(h["occurred_at"]))
             dt.setStyleSheet(f"font-size:12px;color:{theme.NEUTRAL[600]};")
             rl.addWidget(dt)
             rows.addWidget(row)
@@ -279,27 +295,38 @@ class OrderDetailPage(Page):
         return frame
 
     # ── transitions ──
-    def _transition(self, order, new_status, extra):
-        orders = store.load_orders()
-        for o in orders:
-            if o["id"] == order["id"]:
-                o["status"] = new_status
-                o.update(extra)
-                o["history"] = o.get("history", []) + [{"status": new_status, "dateTime": store.format_now()}]
-                break
-        store.save_orders(orders)
-        self.nav.go("order", id=order["id"])
+    def _act(self, call, *args, **kw):
+        """Выполнить операцию и перечитать карточку.
+
+        Версия документа уходит в `If-Match`. Разошлась — значит заказ уже
+        изменили с другого места, и пересказывать пользователю нечего: надо
+        показать ему свежее состояние.
+        """
+        try:
+            call(*args, **kw)
+        except Conflict:
+            self.show_error(type("_", (), {"title":
+                "Заказ уже изменили в другом месте. Открываю текущее состояние."})())
+        except ApiError as exc:
+            self.show_error(exc)
+            return
+        self.nav.go("order", id=self._order["id"])
+
+    def _accept(self, order):
+        self._act(api.client.accept_order, order["id"], order["version"])
 
     def _decline(self, order):
         def on_save(v):
-            self._transition(order, "declined", {"declineReason": v["reason"].strip()})
+            self._act(api.client.decline_order, order["id"], order["version"],
+                      v["reason"].strip())
         form_dialog(self, "Отклонить заказ",
                     [("reason", "Причина отказа (опционально)", "text", "")],
                     on_save, submit_label="Отклонить заказ")
 
     def _cancel(self, order):
         def on_save(v):
-            self._transition(order, "cancelled", {"cancelReason": v["reason"].strip()})
+            self._act(api.client.cancel_order, order["id"], order["version"],
+                      v["reason"].strip())
         form_dialog(self, "Отменить заказ",
                     [("reason", "Причина отмены (опционально)", "text", "")],
                     on_save, submit_label="Отменить заказ")

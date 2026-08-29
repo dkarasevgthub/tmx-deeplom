@@ -11,12 +11,14 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QSpinBox,
+    QDoubleSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from .. import store, theme
+from .. import api, fmt, reference, theme
+from ..api.errors import ApiError
+from ..session import session
 from ..widgets.blueprint import BlueprintFrame
 from ..widgets.combo import SearchableComboBox
 from ..widgets.common import button, h1, icon_button
@@ -37,7 +39,7 @@ class NewOrderPage(Page):
         self._selections = {}       # article -> {"article", "warehouse", "qty"}
         self._expanded = set()      # articles whose extra warehouses are shown
         self._qty_row = None        # row key currently asking for a quantity
-        self._stock = None          # {warehouse: {article: qty}}, read per rebuild
+        self._rows_by_article = {}   # артикул → строка остатков из последнего ответа
         self._drafts = {}           # row key -> quantity being typed
 
         crumb = QLabel(
@@ -73,8 +75,9 @@ class NewOrderPage(Page):
         row = FlowRow(h_spacing=theme.SP6, v_spacing=theme.SP3)
         self._wh_input = SearchableComboBox("Поиск склада")
         self._wh_input.addItem("Все склады — найти где есть", "all")
-        for w in store.warehouses():
-            self._wh_input.addItem(w, w)
+        # Свой склад в списке не нужен: сам у себя заказать нельзя.
+        for w in reference.warehouses(exclude_own=True):
+            self._wh_input.addItem(w["name"], w["id"])
         self._wh_input.currentIndexChanged.connect(self._on_warehouse)
         self._search_input = QLineEdit()
         self._search_input.setPlaceholderText("Артикул или наименование")
@@ -122,27 +125,64 @@ class NewOrderPage(Page):
         return base + [90, 170, 60]
 
     # ── data ──
-    def _stock_entries(self, article):
-        """Warehouses stocking this article, richest first."""
-        stock = self._stock or store.warehouse_stock()
-        scan = store.warehouses() if self._warehouse == "all" else [self._warehouse]
-        entries = [(w, stock.get(w, {}).get(article, 0)) for w in scan]
+    def _stock_entries(self, row):
+        """Склады, где эта позиция есть, — с наибольшим остатком первым.
+
+        Берётся свободный остаток, а не общий: зарезервированное под другие
+        заказы обещать нельзя.
+        """
+        shares = row.get("by_warehouse") or []
+        own = session.warehouse_id
+        entries = [(sh["warehouse_id"], sh.get("free", sh.get("qty", 0)))
+                   for sh in shares
+                   if sh["warehouse_id"] != own          # сам у себя не заказывает
+                   and (self._warehouse == "all" or sh["warehouse_id"] == self._warehouse)]
         return sorted([e for e in entries if e[1] > 0], key=lambda e: -e[1])
 
     def _candidates(self):
-        # one read of the balances per rebuild instead of one per article
-        self._stock = store.warehouse_stock()
-        query = self._search.strip().lower()
+        """Остатки по всем складам одним запросом.
+
+        Разбивка `by_warehouse` нужна именно здесь: пока склад не выбран, экран
+        предлагает тот, где позиции больше всего, а остальные раскрывает
+        дочерними строками.
+        """
+        try:
+            payload = api.client.stock(q=self._search.strip() or None,
+                                       warehouse_id=None if self._warehouse == "all"
+                                       else self._warehouse,
+                                       limit=200)
+        except ApiError as exc:
+            self._table.set_empty_text(exc.title)
+            self._rows_by_article = {}
+            return []
+
+        self._rows_by_article = {r["article"]: r for r in payload["items"]}
         out = []
-        for item in store.catalog_dicts():
-            if query and not any(query in item[f].lower()
-                                 for f in ("name", "article", "code1c")):
-                continue
-            entries = self._stock_entries(item["article"])
+        for row in payload["items"]:
+            entries = self._stock_entries(row)
             if entries:
-                out.append((item, entries))
+                out.append((row, entries))
         out.sort(key=lambda pair: pair[0]["name"].lower())
         return out
+
+    @staticmethod
+    def _qty_spin(unit, available, value):
+        """Поле количества.
+
+        Количества дробные — в справочнике есть метры и листы. Но у штучного
+        товара дробная часть бессмысленна, поэтому число знаков зависит от
+        единицы измерения.
+        """
+        spin = QDoubleSpinBox()
+        spin.setDecimals(0 if unit == "шт." else 3)
+        spin.setSingleStep(1 if unit == "шт." else 0.5)
+        spin.setRange(spin.singleStep(), max(spin.singleStep(), float(available)))
+        spin.setValue(min(float(value), max(spin.singleStep(), float(available))))
+        spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        spin.setProperty("compact", "true")
+        spin.setFixedWidth(70)
+        spin.setFixedHeight(28)
+        return spin
 
     # ── row builders ──
     def _cells(self, item, warehouse, available, action, *, child=False, link=True,
@@ -152,19 +192,21 @@ class NewOrderPage(Page):
                  "" if child else item["name"],
                  ("m", "" if child else item["unit"])]
         if self._show_warehouse_col():
-            cells.append(warehouse_widget if warehouse_widget else ("m", warehouse))
-        cells.append(("m", str(available)))
+            cells.append(warehouse_widget if warehouse_widget
+                         else ("m", reference.warehouse_name(warehouse)))
+        cells.append(("m", fmt.qty(available)))
         cells.append(action)
-        cells.append(("w", lambda a=item["article"]: self._link_cell(a)) if link else "")
+        cells.append(("w", lambda i=item["item_id"]: self._link_cell(i)) if link else "")
         return cells
 
-    def _link_cell(self, article):
+    def _link_cell(self, item_id):
         wrap = QWidget()
         lay = QHBoxLayout(wrap)
         lay.setContentsMargins(0, 0, 0, 0)
         btn = icon_button("book", "Карточка товара", theme.NEUTRAL[600],
                           size=16, box=28, ghost=True)
-        btn.clicked.connect(lambda _=False, a=article: self.nav.go("product", article=a, from_="catalog"))
+        btn.clicked.connect(
+            lambda _=False, i=item_id: self.nav.go("product", id=i, from_="catalog"))
         # кнопка под своим заголовком: колонка теперь подписана «Карточка»
         lay.addWidget(btn)
         lay.addStretch(1)
@@ -190,7 +232,7 @@ class NewOrderPage(Page):
             return wrap
         return ("w", factory)
 
-    def _add_cell(self, key, article, warehouse, available):
+    def _add_cell(self, key, article, warehouse, available, unit):
         """«Добавить» — and, once pressed, the quantity field next to it."""
         def factory():
             wrap = QWidget()
@@ -198,18 +240,12 @@ class NewOrderPage(Page):
             lay.setContentsMargins(0, 0, 0, 0)
             lay.setSpacing(6)
             if self._qty_row == key:
-                spin = QSpinBox()
-                spin.setRange(1, max(1, available))
-                spin.setValue(int(self._drafts.get(key, 1)))
-                spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-                spin.setProperty("compact", "true")
-                spin.setFixedWidth(70)
-                spin.setFixedHeight(28)
+                spin = self._qty_spin(unit, available, self._drafts.get(key, 1))
                 spin.valueChanged.connect(lambda v, k=key: self._drafts.__setitem__(k, v))
                 confirm = button("Добавить", "secondary")
                 confirm.setProperty("compact", "true")
                 confirm.clicked.connect(
-                    lambda _=False: self._add(article, warehouse, int(spin.value())))
+                    lambda _=False: self._add(article, warehouse, spin.value()))
                 lay.addWidget(spin)
                 lay.addWidget(confirm)
             else:
@@ -221,18 +257,13 @@ class NewOrderPage(Page):
             return wrap
         return ("w", factory)
 
-    def _selected_cell(self, article, available, qty):
+    def _selected_cell(self, article, available, qty, unit):
         def factory():
             wrap = QWidget()
             lay = QHBoxLayout(wrap)
             lay.setContentsMargins(0, 0, 0, 0)
             lay.setSpacing(6)
-            spin = QSpinBox()
-            spin.setRange(1, max(1, available))
-            spin.setValue(min(qty, max(1, available)))
-            spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-            spin.setProperty("compact", "true")
-            spin.setFixedWidth(70); spin.setFixedHeight(28)
+            spin = self._qty_spin(unit, available, qty)
             spin.valueChanged.connect(lambda v, a=article: self._selections[a].update(qty=v))
             remove = button("✕", "ghost")
             remove.setProperty("compact", "true")
@@ -252,11 +283,14 @@ class NewOrderPage(Page):
 
         pinned = []
         for article, sel in self._selections.items():
-            item = store.catalog_item(article)
-            available = self._stock.get(sel["warehouse"], {}).get(article, 0)
+            item = self._rows_by_article.get(article)
+            if item is None:
+                continue
+            available = next((e[1] for e in self._stock_entries(item)
+                              if e[0] == sel["warehouse"]), sel["qty"])
             pinned.append((
                 self._cells(item, sel["warehouse"], available,
-                            self._selected_cell(article, available, sel["qty"])),
+                            self._selected_cell(article, available, sel["qty"], item["unit"])),
                 article, SELECTED_BG,
             ))
 
@@ -271,7 +305,7 @@ class NewOrderPage(Page):
                                 if others and self._show_warehouse_col() else None)
             rows.append((
                 self._cells(item, best_wh, best_qty,
-                            self._add_cell(key, item["article"], best_wh, best_qty),
+                            self._add_cell(key, item["article"], best_wh, best_qty, item["unit"]),
                             warehouse_widget=warehouse_widget),
                 key,
             ))
@@ -280,7 +314,7 @@ class NewOrderPage(Page):
                     sub_key = f"{key}::{wh}"
                     rows.append((
                         self._cells(item, wh, qty,
-                                    self._add_cell(sub_key, item["article"], wh, qty),
+                                    self._add_cell(sub_key, item["article"], wh, qty, item["unit"]),
                                     child=True, link=False),
                         sub_key, CHILD_BG,
                     ))
@@ -333,21 +367,17 @@ class NewOrderPage(Page):
     def _do_submit(self):
         if not self._selections:
             return
-        warehouse = next(iter(self._selections.values()))["warehouse"]
-        orders = store.load_orders()
-        next_id = max((o["id"] for o in orders), default=0) + 1
-        next_number = str(2000 + len([o for o in orders if o["direction"] == "ours"]) + 1)
-        created = store.format_now()
-        positions = []
-        for sel in self._selections.values():
-            positions.append({"article": sel["article"], "qty": sel["qty"]})
-        orders.append({
-            "id": next_id, "number": next_number, "direction": "ours", "status": "created",
-            "counterpartyWarehouse": warehouse,
-            "counterpartyResponsible": store.warehouse_responsible(warehouse),
-            "createdDateTime": created, "shipDateTime": "—", "acceptedAt": None,
-            "responsible": store.current_user_name(), "comment": self._comment.strip(),
-            "positions": positions, "history": [{"status": "created", "dateTime": created}],
-        })
-        store.save_orders(orders)
-        self.nav.go("order", id=next_id)
+        # Все позиции гарантированно с одного склада: первая добавленная его
+        # фиксирует, смена очищает выбор.
+        warehouse_id = next(iter(self._selections.values()))["warehouse"]
+        positions = [{"article": sel["article"], "qty": sel["qty"]}
+                     for sel in self._selections.values()]
+        try:
+            # Номер выдаёт сервер, ключ идемпотентности ставит клиент: повтор
+            # из-за таймаута не создаст второй заказ.
+            order = api.client.create_order(warehouse_id, positions,
+                                            self._comment.strip())
+        except ApiError as exc:
+            self.show_error(exc)
+            return
+        self.nav.go("order", id=order["id"])

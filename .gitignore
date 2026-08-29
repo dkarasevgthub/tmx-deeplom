@@ -4,7 +4,7 @@ __pycache__/
 .venv/
 venv/
 
-# Тесты и инструменты
+# Кэши инструментов. Сами тесты в git едут: без них нечего запускать в CI.
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -14,8 +14,6 @@ venv/
 .vscode/
 .claude/
 
-# Рабочие данные приложения — у каждого свои
-desktop/mock_data.json
 
 # Virtual Environment
 .venv/
@@ -36,3 +34,8 @@ pgdata/
 # OS
 .DS_Store
 Thumbs.db
+
+# Секреты окружения и настройки рабочих мест
+.env
+backend/.env
+desktop/.env

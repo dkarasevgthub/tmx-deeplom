@@ -1,7 +1,8 @@
 """Отгрузка — pick, weigh, box and ship outgoing (theirs) orders.
 
 List ⇄ detail is handled inside the page so packing progress survives the
-toggle. Boxes are kept in a module-level store for the session.
+toggle. Boxes live on the server: the client posts qty and weight, the
+barcode comes back.
 """
 import time
 
@@ -19,7 +20,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .. import devices, store, theme
+from .. import api, config, devices, fmt, theme
+from ..api.errors import ApiError, Conflict
 from ..widgets.blueprint import BlueprintFrame
 from ..widgets.common import Tag, button, h1, h4, icon_button
 from ..widgets.dialog import confirm_dialog, weight_dialog
@@ -39,43 +41,17 @@ from ._ui import (
 )
 from .base import BlockColumn, Page
 
-MAX_BOX_WEIGHT = 25.0
 PANEL_PAGE_SIZE = 8      # rows per page in the two detail panels
-# packing progress lives in the store; this is a per-session cache of it
-_PACK = {}
 
-
-def _uw(article):
-    return store.item_weight(article)
-
-
-def _order_weight(o):
-    return sum(_uw(p["article"]) * p["qty"] for p in o["positions"])
-
-
-def _positions(o):
-    """Order positions with the catalogue name and unit filled in."""
-    return store.order_positions(o)
-
-
-def _pack(oid):
-    if oid not in _PACK:
-        saved = store.packing(oid) or {}
-        _PACK[oid] = {"boxes": saved.get("boxes", []), "done": saved.get("done", False),
-                      "responsible": saved.get("responsible"),
-                      "shippedAt": saved.get("shippedAt")}
-    return _PACK[oid]
-
-
-def _save_pack(oid):
-    store.save_packing(oid, _PACK[oid])
+#: Статус отгрузки на языке экрана.
+STATUS_LABEL = {
+    "waiting": ("Ожидает", theme.NEUTRAL[800], theme.NEUTRAL[200]),
+    "progress": ("В сборке", theme.ACCENT2_RAMP[700], theme.ACCENT2_RAMP[100]),
+    "done": ("Отгружен", theme.ACCENT_RAMP[700], "transparent"),
+}
 
 
 NO_PRINTER = "Принтер недоступен — упаковка и отгрузка заблокированы"
-
-
-def _packed_qty(pd, article):
-    return sum(b["qty"] for b in pd["boxes"] if b["article"] == article)
 
 
 def _kicker_value(kicker, value):
@@ -99,18 +75,6 @@ def config_table(table, widths):
         hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed)
     # widths act as per-column minimums; the rest follows the table's width
     table._width_floors = list(widths)
-
-
-def _within(value, start, end):
-    """Is a "dd.MM.yyyy HH:mm" stamp inside the bounds? A row with no date is
-    filtered out as soon as either bound is set, as in the mockup."""
-    if start is None and end is None:
-        return True
-    parsed = store.parse_ru_datetime(value)
-    if parsed is None:
-        return False
-    day = parsed.date()
-    return not ((start and day < start) or (end and day > end))
 
 
 def cell(table, r, c, text, color=None, heading=False):
@@ -197,9 +161,6 @@ class ShippingPage(Page):
         color = theme.ACCENT_RAMP[700] if stable else theme.NEUTRAL[600]
         return f"font-family:{theme.font_heading()};font-size:36px;color:{color};"
 
-    def _shipments(self):
-        return [o for o in store.load_orders()
-                if o["direction"] == "theirs" and o["status"] in ("created", "processing", "shipped")]
 
     # ── list ──
     def _build_list(self):
@@ -253,71 +214,66 @@ class ShippingPage(Page):
 
         self._table = TableSection(
             headers=["Заказ", "Статус", "Прогресс", "Вес, кг", "Ответственный", "Создан", "Отгружен"],
-            widths=[72, 116, 96, 96, 0, 128, 128], rows=self._list_rows(),
+            widths=[72, 116, 96, 96, 0, 128, 128], rows=[],
             on_row_click=self._open, page_size=13, auto_rows=True,
+            on_page_change=self._list_rows,
         )
         self._container.add_block(self._table)
+        self._list_rows()
 
-    def _list_rows(self):
-        q = self._search.strip().lower()
-        wmin = number_value(self._weight_min_input)
-        wmax = number_value(self._weight_max_input)
+    def _list_rows(self, page=1):
+        """Фильтры и страницы считает сервер: видны только заказы, где мы
+        отправитель."""
+        size = self._table.page_size()
+        try:
+            payload = api.client.shipments(
+                status=None if self._status == "all" else self._status,
+                q=self._search.strip() or None,
+                weight_min=number_value(self._weight_min_input),
+                weight_max=number_value(self._weight_max_input),
+                created_from=self._created_from, created_to=self._created_to,
+                shipped_from=self._ship_from, shipped_to=self._ship_to,
+                limit=size, offset=(page - 1) * size,
+            )
+        except ApiError as exc:
+            self._table.set_empty_text(exc.title)
+            self._table.set_rows([], total=0, keep_page=True)
+            return
+
         rows = []
-        for o in sorted(self._shipments(), key=lambda o: o["id"], reverse=True):
-            if q and q not in o["number"].lower():
-                continue
-            weight = _order_weight(o)
-            if wmin is not None and weight < wmin:
-                continue
-            if wmax is not None and weight > wmax:
-                continue
-            if not _within(o["createdDateTime"], self._created_from, self._created_to):
-                continue
-            if not _within(o["shipDateTime"], self._ship_from, self._ship_to):
-                continue
-            pd = _PACK.get(o["id"])
-            done = (pd and pd["done"]) or o["status"] == "shipped"
-            has_boxes = bool(pd and pd["boxes"])
-            if done:
-                label, color, bg, key = "Отгружен", theme.ACCENT_RAMP[700], "transparent", "done"
-            elif has_boxes:
-                label, color, bg, key = "В сборке", theme.ACCENT2_RAMP[700], theme.ACCENT2_RAMP[100], "progress"
-            else:
-                label, color, bg, key = "Ожидает", theme.NEUTRAL[800], theme.NEUTRAL[200], "waiting"
-            if self._status != "all" and key != self._status:
-                continue
-            total = len(o["positions"])
-            assembled = (len([p for p in o["positions"] if p["qty"] - _packed_qty(pd, p["article"]) <= 0])
-                         if pd else (total if o["status"] == "shipped" else 0))
-            responsible = (pd and pd["responsible"]) or (o["responsible"] if o["status"] == "shipped" else "—")
-            ship_date = o["shipDateTime"] if o["shipDateTime"] not in (None, "—") else "—"
+        for it in payload["items"]:
+            label, color, bg = STATUS_LABEL.get(it["status"], STATUS_LABEL["waiting"])
+            who = it.get("responsible") or {}
             rows.append((
-                [("h", "№" + o["number"]), ("tag", label, color, bg), f"{assembled} из {total}",
-                 ("m", f"{_order_weight(o):.1f} кг"), ("m", responsible),
-                 ("m", o["createdDateTime"]), ("m", ship_date)],
-                o["id"],
+                [("h", "№" + it["number"]), ("tag", label, color, bg),
+                 f'{it["positions_packed"]} из {it["positions_total"]}',
+                 ("m", f'{it["weight_expected"]:.1f} кг'),
+                 ("m", fmt.short_name(who.get("name", "")) if who else "—"),
+                 ("m", fmt.datetime_(it["created_at"])),
+                 ("m", fmt.datetime_(it.get("shipped_at")))],
+                it["order_id"],
             ))
-        return rows
+        self._table.set_rows(rows, total=payload["total"], keep_page=page > 1)
 
     def _on_search(self, text):
         self._search = text
-        self._table.set_rows(self._list_rows())
+        self._list_rows()
 
     def _on_status(self, _):
         self._status = self._status_input.currentData()
-        self._table.set_rows(self._list_rows())
+        self._list_rows()
 
     def _on_weight(self, _=None):
         self._weight_min = self._weight_min_input.text()
         self._weight_max = self._weight_max_input.text()
-        self._table.set_rows(self._list_rows())
+        self._list_rows()
 
     def _on_dates(self, _=None):
         self._created_from = date_value(self._created_from_input)
         self._created_to = date_value(self._created_to_input)
         self._ship_from = date_value(self._ship_from_input)
         self._ship_to = date_value(self._ship_to_input)
-        self._table.set_rows(self._list_rows())
+        self._list_rows()
 
     def _reset(self):
         self._search = ""; self._status = "all"
@@ -330,10 +286,9 @@ class ShippingPage(Page):
         for edit in (self._created_from_input, self._created_to_input,
                      self._ship_from_input, self._ship_to_input):
             clear_date(edit)
-        self._table.set_rows(self._list_rows())
+        self._list_rows()
 
     def _open(self, oid):
-        _pack(oid)
         self._active_id = oid
         self._topack_page = 1
         self._boxes_page = 1
@@ -360,9 +315,14 @@ class ShippingPage(Page):
 
     # ── detail ──
     def _build_detail(self):
-        o = store.order_by_id(self._active_id)
-        pd = _pack(self._active_id)
-        done = pd["done"] or o["status"] == "shipped"
+        try:
+            self._doc = api.client.shipment(self._active_id)
+        except ApiError as exc:
+            self._container.add_block(QLabel(exc.title))
+            return
+        o = self._doc["order"]
+        pd = self._doc
+        done = self._doc["status"] == "done"
 
         crumb = QLabel(
             f'<a href="#home" style="color:{theme.NEUTRAL[600]};text-decoration:none;">ProЗапас</a> / '
@@ -385,14 +345,10 @@ class ShippingPage(Page):
             head.addWidget(ship, 0, Qt.AlignmentFlag.AlignTop)
         self._container.add_block(head)
 
-        if done:
-            label, color, bg = "Отгружен", theme.ACCENT_RAMP[700], "transparent"
-        elif pd["boxes"]:
-            label, color, bg = "В сборке", theme.ACCENT2_RAMP[700], theme.ACCENT2_RAMP[100]
-        else:
-            label, color, bg = "Ожидает", theme.NEUTRAL[800], theme.NEUTRAL[200]
+        label, color, bg = STATUS_LABEL.get(pd["status"], STATUS_LABEL["waiting"])
         packed_weight = sum(float(b["weight"]) for b in pd["boxes"])
-        fully = len([p for p in o["positions"] if p["qty"] - _packed_qty(pd, p["article"]) <= 0])
+        fully = len([p for p in pd["to_pack"] if p["remaining"] <= 0])
+        who = pd.get("responsible") or {}
         info = BlueprintFrame(padding=theme.SP4)
         # `flex-wrap: wrap` in the mockup: the fields move to the next line
         # instead of being squeezed when the window narrows
@@ -400,13 +356,14 @@ class ShippingPage(Page):
         stat = QWidget(); sv = QVBoxLayout(stat); sv.setContentsMargins(0, 0, 0, 0); sv.setSpacing(2)
         sk = QLabel("Статус"); sk.setObjectName("kicker"); sv.addWidget(sk); sv.addWidget(Tag(label, color, bg))
         irow.add(stat)
-        irow.add(_kicker_value("Ответственный", pd["responsible"] or (o["responsible"] if done else "—")))
-        irow.add(_kicker_value("Дата создания", o["createdDateTime"]))
-        irow.add(_kicker_value("Дата отгрузки", pd["shippedAt"] or (o["shipDateTime"] if done else "—")))
-        irow.add(_kicker_value("Позиций", len(o["positions"])))
+        irow.add(_kicker_value("Ответственный",
+                               fmt.short_name(who.get("name", "")) if who else "—"))
+        irow.add(_kicker_value("Дата создания", fmt.datetime_(o["created_at"])))
+        irow.add(_kicker_value("Дата отгрузки", fmt.datetime_(o.get("shipped_at"))))
+        irow.add(_kicker_value("Позиций", len(pd["to_pack"])))
         irow.add(_kicker_value("Коробок", len(pd["boxes"])))
         irow.add(_kicker_value("Упаковано, вес", f"{packed_weight:.1f} кг"))
-        irow.add(_kicker_value("Прогресс", f"{fully} из {len(o['positions'])}"))
+        irow.add(_kicker_value("Прогресс", f"{fully} из {len(pd['to_pack'])}"))
         info.content_layout().addWidget(irow)
         self._container.add_block(info)
 
@@ -434,8 +391,8 @@ class ShippingPage(Page):
             return frame
 
         if self._active_article:
-            pos = next(p for p in _positions(o) if p["article"] == self._active_article)
-            remaining = pos["qty"] - _packed_qty(pd, pos["article"])
+            pos = next(p for p in pd["to_pack"] if p["article"] == self._active_article)
+            remaining = pos["remaining"]
             top = QHBoxLayout()
             box = QVBoxLayout();
             box.setSpacing(2)
@@ -525,12 +482,11 @@ class ShippingPage(Page):
         fl.addWidget(h4("К упаковке"))
 
         # fully packed positions sink to the bottom, as in the mockup
-        positions = sorted(_positions(o),
-                           key=lambda p: 1 if p["qty"] - _packed_qty(pd, p["article"]) <= 0 else 0)
+        # Сервер уже посчитал заказано/упаковано/осталось по каждой позиции.
+        positions = sorted(pd["to_pack"], key=lambda p: 1 if p["remaining"] <= 0 else 0)
         rows = []
         for p in positions:
-            packed = _packed_qty(pd, p["article"])
-            remaining = p["qty"] - packed
+            packed, remaining = p["packed"], p["remaining"]
             spent = remaining <= 0
             # a finished position is greyed out whole; the one being packed is
             # tinted through the row background
@@ -538,17 +494,17 @@ class ShippingPage(Page):
             rows.append((
                 [("c", p["article"], muted or theme.NEUTRAL[600]),
                  ("c", p["name"], muted),
-                 ("c", f'{p["qty"]} {p["unit"]}', muted),
-                 ("c", f'{packed} {p["unit"]}', muted),
-                 ("c", "0" if spent else str(remaining),
+                 ("c", fmt.qty(p["ordered"], p["unit"]), muted),
+                 ("c", fmt.qty(packed, p["unit"]), muted),
+                 ("c", "0" if spent else fmt.qty(remaining),
                   muted or (theme.ACCENT_RAMP[700] if spent else theme.TEXT))],
                 p["article"],
                 theme.ACCENT_RAMP[100] if (not spent and self._active_article == p["article"]) else None,
             ))
 
         def on_click(article):
-            pos = next((p for p in _positions(o) if p["article"] == article), None)
-            if pos is not None and pos["qty"] - _packed_qty(pd, pos["article"]) > 0:
+            pos = next((p for p in pd["to_pack"] if p["article"] == article), None)
+            if pos is not None and pos["remaining"] > 0:
                 self._select_position(article)
 
         section = TableSection(
@@ -576,9 +532,9 @@ class ShippingPage(Page):
             # артикул не показываем: он внутри штрихкода, а панель узкая —
             # иначе колонка с кнопками уезжает за край при небольшом окне
             cells = [("h", b["barcode"], theme.ACCENT_RAMP[700]),
-                     f'{b["qty"]} {store.item_unit(b["article"])}',
+                     fmt.qty(b["qty"], self._unit_of(b["article"])),
                      f'{b["weight"]} кг']
-            cells.append("" if done else ("w", lambda bc=b["barcode"]: self._box_actions(bc)))
+            cells.append("" if done else ("w", lambda box=b: self._box_actions(box)))
             rows.append((cells, b["barcode"]))
 
         section = TableSection(
@@ -595,7 +551,12 @@ class ShippingPage(Page):
         fl.addStretch(1)
         return frame
 
-    def _box_actions(self, barcode):
+    def _unit_of(self, article):
+        """Единица берётся из позиций заказа: коробка её не дублирует."""
+        pos = next((p for p in self._doc["to_pack"] if p["article"] == article), None)
+        return (pos or {}).get("unit", "")
+
+    def _box_actions(self, box):
         """Reprint / delete — the mockup's last column."""
         wrap = QWidget()
         lay = QHBoxLayout(wrap)
@@ -607,31 +568,27 @@ class ShippingPage(Page):
                               "Перепечатать этикетку" if has_printer else NO_PRINTER,
                               theme.ACCENT, size=15, box=26, ghost=True)
         reprint.setEnabled(has_printer)
-        reprint.clicked.connect(lambda _=False, bc=barcode: self._reprint_box(bc))
+        reprint.clicked.connect(lambda _=False, b=box: self._reprint_box(b))
         remove = icon_button("trash", "Удалить коробку", theme.ACCENT,
                              size=15, box=26, ghost=True)
-        remove.clicked.connect(lambda _=False, bc=barcode: self._delete_box(bc))
+        remove.clicked.connect(lambda _=False, b=box: self._delete_box(b))
         lay.addWidget(reprint)
         lay.addWidget(remove)
         return wrap
 
-    def _reprint_box(self, barcode):
+    def _reprint_box(self, box):
         if not devices.available("printer"):
             return
-        pd = _pack(self._active_id)
-        box = next((b for b in pd["boxes"] if b["barcode"] == barcode), None)
-        if box is not None:
-            # Ключ обязан быть новым: по совпадающему служба считает задание
-            # повтором и возвращает старое, ничего не печатая. Идемпотентность
-            # нужна первой печати (защита от двойного клика), а перепечатка —
-            # это осознанная просьба выдать ещё одну этикетку.
-            devices.print_label(
-                key=f"box-{barcode}#{time.time_ns()}",
-                payload=self._label_zpl(barcode, store.item_name(box["article"]),
-                                        box["qty"], store.item_unit(box["article"]),
-                                        box["weight"]),
-            )
-        self._print_msg = f"Этикетка {barcode} отправлена на печать"
+        # Ключ обязан быть новым: по совпадающему служба считает задание
+        # повтором и возвращает старое, ничего не печатая. Идемпотентность
+        # нужна первой печати (защита от двойного клика), а перепечатка —
+        # это осознанная просьба выдать ещё одну этикетку.
+        devices.print_label(
+            key=f'box-{box["barcode"]}#{time.time_ns()}',
+            payload=self._label_zpl(box["barcode"], box.get("name", ""), box["qty"],
+                                    self._unit_of(box["article"]), box["weight"]),
+        )
+        self._print_msg = f'Этикетка {box["barcode"]} отправлена на печать'
         self._render()
 
     def _select_position(self, article):
@@ -645,18 +602,18 @@ class ShippingPage(Page):
         self._render()
 
     def _read_scale(self, o, pd):
-        pos = next(p for p in _positions(o) if p["article"] == self._active_article)
-        remaining = pos["qty"] - _packed_qty(pd, pos["article"])
+        pos = next(p for p in pd["to_pack"] if p["article"] == self._active_article)
+        remaining = pos["remaining"]
         if remaining <= 0:
             return
-        uw = _uw(pos["article"])
+        uw = pos["unit_weight"]
         # Весы на связи — записываем ровно то число, которое кладовщик видит на
         # панели. Ни запроса к службе, ни подтверждения: коробка уже на весах.
         if devices.available("scale") and self._live is not None:
             weight = self._live[0]
         else:
             # Весов нет (или поток ещё ничего не дал) — оператор читает табло сам
-            weight = weight_dialog(self, hint=f"не более {MAX_BOX_WEIGHT:.0f} кг на коробку")
+            weight = weight_dialog(self)
             if weight is None:
                 return
         computed = max(1, round(weight / uw))
@@ -669,79 +626,91 @@ class ShippingPage(Page):
 
     @staticmethod
     def _label_zpl(barcode, name, qty, unit, weight):
-        """Этикетка коробки 58×40 мм при 203 dpi.
+        """Этикетка коробки. Размер и плотность печати — из настроек.
+
+        Раньше 58×40 мм при 203 dpi стояли числами прямо в команде: на принтере
+        с другой плотностью макет уезжал за край, и поправить это без пересборки
+        было нельзя.
 
         Макет живёт здесь только до появления сервера: по плану шаблон хранится
         на нём, чтобы правка не требовала пересборки приложения.
         """
+        dpi = config.number("PROZAPAS_LABEL_DPI")
+        dots = lambda mm: round(mm / 25.4 * dpi)      # noqa: E731
+        width = dots(config.number("PROZAPAS_LABEL_WIDTH_MM"))
+        height = dots(config.number("PROZAPAS_LABEL_HEIGHT_MM"))
+        pad = dots(3)
         title = name[:28]
         return (
             "^XA"
             "^CI28"                       # UTF-8, иначе кириллица уедет
-            "^PW464^LL320"
-            f"^FO24,24^A0N,28,28^FD{title}^FS"
-            f"^FO24,64^A0N,24,24^FD{qty} {unit} / {weight} кг^FS"
-            f"^FO24,110^BY2^BCN,90,Y,N,N^FD{barcode}^FS"
+            f"^PW{width}^LL{height}"
+            f"^FO{pad},{pad}^A0N,28,28^FD{title}^FS"
+            f"^FO{pad},{pad + dots(5)}^A0N,24,24^FD{qty} {unit} / {weight} кг^FS"
+            f"^FO{pad},{pad + dots(11)}^BY2^BCN,{dots(11)},Y,N,N^FD{barcode}^FS"
             "^XZ"
         )
 
     def _print_label(self, o, pd):
+        """Коробка создаётся на сервере, потом печатается этикетка.
+
+        Порядок именно такой: зажевало ленту — коробка на месте, этикетку
+        перепечатают. Не вышла вовсе — коробку удаляют, поэтому отметки о
+        печати в базе и не нужно.
+        """
         if not devices.available("printer"):
             return
-        pos = next(p for p in _positions(o) if p["article"] == self._active_article)
-        seq = len(pd["boxes"]) + 1
-        barcode = f'SH{o["number"]}{pos["article"]}-{seq:02d}'
-        pd["boxes"].append({"barcode": barcode, "article": pos["article"],
-                            "qty": self._weighed["qty"], "weight": self._weighed["weight"]})
-        pd["responsible"] = pd["responsible"] or store.current_user_name()
+        pos = next(p for p in pd["to_pack"] if p["article"] == self._active_article)
+        try:
+            box = api.client.pack_box(self._active_id, pos["article"],
+                                      self._weighed["qty"], self._weighed["weight"])
+        except ApiError as exc:
+            self.show_error(exc)
+            return
+
         devices.print_label(
-            key=f"box-{barcode}",
-            payload=self._label_zpl(barcode, pos["name"], self._weighed["qty"],
-                                    pos["unit"], self._weighed["weight"]),
+            key=f'box-{box["barcode"]}',
+            payload=self._label_zpl(box["barcode"], pos["name"], box["qty"],
+                                    pos["unit"], box["weight"]),
         )
-        remaining_after = pos["qty"] - _packed_qty(pd, pos["article"])
         self._weighed = None
-        if remaining_after <= 0:
+        if pos["remaining"] - box["qty"] <= 0:
             self._active_article = None
-        self._print_msg = f"Этикетка {barcode} отправлена на печать"
-        _save_pack(self._active_id)
+        self._print_msg = f'Этикетка {box["barcode"]} отправлена на печать'
         self._render()
 
-    def _delete_box(self, barcode):
-        pd = _pack(self._active_id)
-        pd["boxes"] = [b for b in pd["boxes"] if b["barcode"] != barcode]
+    def _delete_box(self, box):
+        try:
+            api.client.delete_box(self._active_id, box["id"])
+        except ApiError as exc:
+            self.show_error(exc)
+            return
         self._print_msg = ""
-        _save_pack(self._active_id)
         self._render()
 
     def _request_ship(self, o):
-        pd = _pack(self._active_id)
-        shortage = [(p["name"], p["unit"], p["qty"] - _packed_qty(pd, p["article"]))
-                    for p in _positions(o) if p["qty"] - _packed_qty(pd, p["article"]) > 0]
+        shortage = [p for p in self._doc["to_pack"] if p["remaining"] > 0]
         if shortage:
-            lines = "\n".join(f'· {n} — осталось {rem} {u}' for n, u, rem in shortage)
-            if confirm_dialog(self, "Упакованы не все позиции",
-                              f"Осталось упаковать позиций: {len(shortage)}. Заказ будет отгружен с недостачей.\n\n{lines}",
-                              confirm_label="Отгрузить с недостачей"):
-                self._ship_now(o)
-        else:
-            self._ship_now(o)
+            lines = "\n".join(f'· {p["name"]} — осталось {fmt.qty(p["remaining"], p["unit"])}'
+                               for p in shortage)
+            if not confirm_dialog(
+                    self, "Упакованы не все позиции",
+                    f"Осталось упаковать позиций: {len(shortage)}. "
+                    f"Заказ будет отгружен с недостачей.\n\n{lines}",
+                    confirm_label="Отгрузить с недостачей"):
+                return
+        self._ship_now(o)
 
     def _ship_now(self, o):
-        shipped_at = store.format_now()
-        pd = _pack(self._active_id)
-        pd["done"] = True
-        pd["shippedAt"] = shipped_at
-        pd["responsible"] = pd["responsible"] or store.current_user_name()
-        _save_pack(self._active_id)
-        orders = store.load_orders()
-        for x in orders:
-            if x["id"] == o["id"]:
-                x["status"] = "shipped"
-                x["shipDateTime"] = shipped_at
-                x["history"] = x.get("history", []) + [{"status": "shipped", "dateTime": shipped_at}]
-                break
-        store.save_orders(orders)
+        """Отгрузка — одна транзакция на сервере: списание, статусы, движения."""
+        try:
+            api.client.ship(self._active_id, self._doc["version"])
+        except Conflict:
+            self.show_error(type("_", (), {"title":
+                "Отгрузку уже изменили в другом месте. Открываю текущее состояние."})())
+        except ApiError as exc:
+            self.show_error(exc)
+            return
         self._active_article = None
         self._weighed = None
         self._render()

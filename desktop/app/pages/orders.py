@@ -1,7 +1,8 @@
 """Заказы — order list with incoming/outgoing tabs and filters."""
 from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLineEdit
 
-from .. import store, theme
+from .. import api, fmt, reference, theme
+from ..api.errors import ApiError
 from ..widgets.combo import SearchableComboBox
 from ..widgets.common import breadcrumb, button, icon_button
 from ..widgets.flow import FlowRow
@@ -15,6 +16,10 @@ from ._ui import (
     labeled_field,
 )
 from .base import Page
+
+#: Вкладка экрана → параметр API. «Входящие» — у нас заказали и мы отгружаем;
+#: «исходящие» — заказали мы, товар придёт к нам.
+TAB_TO_API = {"theirs": "incoming", "ours": "outgoing"}
 
 STATUS_OPTIONS = [
     ("all", "Все статусы"), ("created", "Создан"), ("processing", "В обработке"),
@@ -87,6 +92,7 @@ class OrdersPage(Page):
         self._table = TableSection(
             headers=self._headers(), widths=[72, 116, 0, 84, 0, 128, 128],
             rows=[], on_row_click=self._open_order, page_size=13, auto_rows=True,
+            on_page_change=self._refresh,      # страницу подгружает сервер
         )
         self.add_block(self._table)
         self.col.addStretch(1)
@@ -117,35 +123,25 @@ class OrdersPage(Page):
         self._refresh_responsible_options()
         self._refresh()
 
-    def _tab_orders(self):
-        return [o for o in store.load_orders() if o["direction"] == self._tab]
-
     def _refresh_warehouse_options(self):
+        """Склады берём из справочника, а не из выборки заказов: с серверной
+        пагинацией полного списка заказов у экрана нет."""
         self._warehouse_input.blockSignals(True)
         self._warehouse_input.clear()
         self._warehouse_input.addItem("Все склады", "all")
-        seen = []
-        for o in self._tab_orders():
-            if o["counterpartyWarehouse"] not in seen:
-                seen.append(o["counterpartyWarehouse"])
-        for w in seen:
-            self._warehouse_input.addItem(w, w)
+        for w in reference.warehouses(exclude_own=True):
+            self._warehouse_input.addItem(w["name"], w["id"])
         self._warehouse_input.blockSignals(False)
 
     def _refresh_responsible_options(self):
-        """Responsible list narrows to the selected warehouse, as in the mockup."""
+        """Ответственные — сотрудники склада-контрагента, а при «всех складах»
+        все, кого видит справочник."""
         self._responsible_input.blockSignals(True)
         self._responsible_input.clear()
         self._responsible_input.addItem("Все", "all")
-        pool = self._tab_orders()
-        if self._warehouse != "all":
-            pool = [o for o in pool if o["counterpartyWarehouse"] == self._warehouse]
-        seen = []
-        for o in pool:
-            if o["responsible"] not in seen:
-                seen.append(o["responsible"])
-        for r in seen:
-            self._responsible_input.addItem(r, r)
+        wid = None if self._warehouse == "all" else self._warehouse
+        for u in reference.people(warehouse_id=wid):
+            self._responsible_input.addItem(fmt.short_name(u["name"]), u["id"])
         self._responsible_input.blockSignals(False)
         self._responsible = "all"
 
@@ -182,41 +178,41 @@ class OrdersPage(Page):
     def _open_order(self, oid):
         self.nav.go("order", id=oid)
 
-    def _refresh(self):
-        q = self._search.strip().lower()
-        date_from = date_value(self._date_from)
-        date_to = date_value(self._date_to)
+    def _refresh(self, page: int = 1):
+        """Фильтры и страницы считает сервер: своего полного списка у экрана нет."""
+        size = self._table.page_size()
+        try:
+            payload = api.client.orders(
+                TAB_TO_API[self._tab],
+                status=None if self._status == "all" else self._status,
+                warehouse_id=None if self._warehouse == "all" else self._warehouse,
+                responsible_id=None if self._responsible == "all" else self._responsible,
+                created_from=date_value(self._date_from),
+                created_to=date_value(self._date_to),
+                q=self._search.strip() or None,
+                limit=size, offset=(page - 1) * size,
+            )
+        except ApiError as exc:
+            # Список объясняет отказ на своём месте. Модальное окно тут нельзя:
+            # обновление зовётся и при перелистывании, и при каждом фильтре —
+            # недоступный сервер завалил бы экран диалогами.
+            self._table.set_empty_text(exc.title)
+            self._table.set_rows([], total=0, keep_page=True)
+            return
+
+        self._table.set_empty_text("Ничего не найдено по этим условиям")
         rows = []
-        orders = self._tab_orders()
-        orders.sort(key=lambda o: o["id"], reverse=True)
-        for o in orders:
-            if q and q not in o["number"].lower():
-                continue
-            if self._status != "all" and o["status"] != self._status:
-                continue
-            if self._warehouse != "all" and o["counterpartyWarehouse"] != self._warehouse:
-                continue
-            if self._responsible != "all" and o["responsible"] != self._responsible:
-                continue
-            if date_from or date_to:
-                created = store.parse_ru_datetime(o["createdDateTime"])
-                created = created.date() if created else None
-                if created is None:
-                    continue
-                if date_from and created < date_from:
-                    continue
-                if date_to and created > date_to:
-                    continue
+        for o in payload["items"]:
             label, color, bg = theme.status_meta(o["status"])
-            last = o["shipDateTime"] if self._tab == "theirs" else (o.get("acceptedAt") or "—")
+            last = o["shipped_at"] if self._tab == "theirs" else o.get("accepted_at")
             rows.append((
                 [("h", "№" + o["number"]),
                  ("tag", label, color, bg),
-                 ("m", o["counterpartyWarehouse"]),
-                 ("m", str(len(o["positions"]))),
-                 ("m", o["responsible"]),
-                 ("m", o["createdDateTime"]),
-                 ("m", last)],
+                 ("m", o["counterparty"]["name"]),
+                 ("m", str(o["positions_count"])),
+                 ("m", fmt.short_name((o.get("responsible") or {}).get("name", ""))),
+                 ("m", fmt.datetime_(o["created_at"])),
+                 ("m", fmt.datetime_(last))],
                 o["id"],
             ))
-        self._table.set_rows(rows)
+        self._table.set_rows(rows, total=payload["total"], keep_page=page > 1)

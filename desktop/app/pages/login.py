@@ -9,7 +9,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .. import store, theme
+from .. import theme
+from ..api.errors import ApiError, Forbidden, NetworkError, Unauthorized
+from ..session import session
 from ..widgets.blueprint import BlueprintFrame
 from ..widgets.common import button
 
@@ -120,21 +122,28 @@ class LoginPage(QWidget):
             self._show_error("Введите логин и пароль.")
             return
 
-        user, error = store.authenticate(login, password)
-        if error == "blocked":
+        try:
+            session.login(login, password, remember=self.remember.isChecked())
+        except NetworkError:
+            self._show_error("Сервер недоступен. Проверьте связь и попробуйте снова.")
+            return
+        except Forbidden:
             self._show_error("Учётная запись заблокирована. Обратитесь к администратору.")
             self.password.clear()
             return
-        if error:
-            # намеренно одна формулировка на «нет такого логина» и «неверный
-            # пароль»: иначе по ответу можно перебирать существующие учётные записи
+        except Unauthorized:
+            # Намеренно одна формулировка на «нет такого логина» и «неверный
+            # пароль»: иначе по ответу можно перебирать учётные записи. Сервер
+            # по той же причине не уточняет, что именно неверно.
             self._show_error("Неверный логин или пароль.")
             self.password.clear()
             self.password.setFocus()
             return
+        except ApiError as exc:
+            self._show_error(exc.title)
+            self.password.clear()
+            return
 
-        store.save_auth({"id": user["id"], "remember": self.remember.isChecked()})
-        store.record_login(user["id"])
         self.error.setVisible(False)
         self.password.clear()
         self.logged_in.emit()

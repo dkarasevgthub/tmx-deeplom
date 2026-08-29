@@ -15,7 +15,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import devices, store, theme
+from . import devices, theme
+from .session import session
 from .widgets.common import button, svg_pixmap
 from .widgets.devicelog import show_device_log
 
@@ -189,12 +190,11 @@ class Sidebar(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
-        me = store.current_user()
+        me = session.user
         name, position, uid = "—", "", None
         if me:
-            parts = me["fullName"].split()
-            name = parts[0] + (" " + "".join(p[0] + "." for p in parts[1:3]) if len(parts) > 1 else "")
-            position = me.get("position", "")
+            name = session.display_name()
+            position = me.get("position") or ""
             uid = me["id"]
 
         info = QWidget()

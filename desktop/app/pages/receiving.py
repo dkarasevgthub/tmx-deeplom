@@ -1,8 +1,9 @@
-"""Приемка — scan incoming boxes against expected weight and accept batches.
+"""Приемка — сканирование коробок отправителя и приём заказа.
 
-Batches come from a demo supplier list plus our own outgoing orders that are in
-transit (status processing/received). List ⇄ detail and scan progress are kept
-inside the page for the session.
+Партия приёмки — это наш исходящий заказ в пути. Сканируются те самые коробки,
+которые упаковал склад-отправитель: их штрихкоды и ожидаемые веса приходят с
+сервера, ничего не синтезируется. Результат скана пишется на коробку, поэтому
+отдельного журнала сканов нет.
 """
 from PyQt6.QtCore import QDate, Qt
 from PyQt6.QtWidgets import (
@@ -14,7 +15,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .. import devices, store, theme
+from .. import api, devices, fmt, theme
+from ..api.errors import ApiError, Conflict
 from ..widgets.blueprint import BlueprintFrame
 from ..widgets.common import Tag, button, h1, h4, icon_button
 from ..widgets.dialog import confirm_dialog, weight_dialog
@@ -30,98 +32,14 @@ from ._ui import (
     number_value,
 )
 from .base import BlockColumn, Page
-from .shipping import PANEL_PAGE_SIZE, _kicker_value, _within
+from .shipping import PANEL_PAGE_SIZE, _kicker_value
 
-_BATCH_DATA = {}   # per-session cache of the scan progress kept in the store
-
-
-def _batches():
-    """Supplier batches from the store plus our own orders that are in transit."""
-    out = [dict(b) for b in store.receiving_batches()]
-    for o in store.load_orders():
-        if o["direction"] == "ours" and o["status"] in ("processing", "received"):
-            out.append({
-                "id": f"ord-{o['id']}", "number": o["number"],
-                "supplier": o["counterpartyWarehouse"],
-                "shipDateTime": o["shipDateTime"],
-                "createdDateTime": o["createdDateTime"],
-                # one box per position, weighing the whole line
-                "positions": [{"article": p["article"], "boxes": 1,
-                               "boxWeight": store.item_weight(p["article"]) * p["qty"]}
-                              for p in o["positions"]],
-                "orderId": o["id"],
-            })
-    return out
-
-
-def _batch_by_id(bid):
-    for b in _batches():
-        if str(b["id"]) == str(bid):
-            return b
-    return None
-
-
-def _batch_positions(b):
-    return b["positions"]
-
-
-def _total_boxes(b):
-    return sum(p["boxes"] for p in b["positions"])
-
-
-def _total_weight(b):
-    return sum(p["boxes"] * p["boxWeight"] for p in b["positions"])
-
-
-def _batch_boxes(batch):
-    """Expand the positions of a batch into the individual boxes to scan."""
-    boxes = []
-    code = store.warehouse_code()
-    for p in batch["positions"]:
-        article, count, weight = p["article"], p["boxes"], p["boxWeight"]
-        item = store.catalog_item(article) or {}
-        base = f"WH{code}{batch['number']}{article}"
-        for i in range(1, count + 1):
-            boxes.append({
-                "barcode": base + (f"-{i:02d}" if count > 1 else ""),
-                "article": article, "code1c": item.get("code1c", "—"),
-                "name": item.get("name", article),
-                "boxLabel": (f"Коробка {i} из {count}" if count > 1 else "Коробка 1 из 1"),
-                "expectedWeight": f"{weight:.1f}",
-            })
-    return boxes
-
-
-# what a scanned box keeps in the file — the rest is looked up in the catalogue
-_SCAN_KEYS = ("barcode", "article", "actualWeight", "diffKg", "diffPercent", "isMissing")
-
-
-def _bdata(bid):
-    """Scan progress for a batch, restored from the store on first use."""
-    if bid not in _BATCH_DATA:
-        saved = store.batch_progress(bid) or {}
-        scanned = []
-        for entry in saved.get("scanned", []):
-            item = store.catalog_item(entry.get("article")) or {}
-            scanned.append(dict(entry, code1c=item.get("code1c", "—"),
-                                name=item.get("name", entry.get("article", ""))))
-        done_codes = {e["barcode"] for e in scanned}
-        batch = _batch_by_id(bid)
-        pending = [b for b in _batch_boxes(batch) if b["barcode"] not in done_codes] if batch else []
-        _BATCH_DATA[bid] = {"pending": pending, "scanned": scanned,
-                            "done": saved.get("done", False),
-                            "responsible": saved.get("responsible"),
-                            "acceptedAt": saved.get("acceptedAt")}
-    return _BATCH_DATA[bid]
-
-
-def _save_bdata(bid):
-    bd = _BATCH_DATA[bid]
-    store.save_batch_progress(bid, {
-        "scanned": [{k: e[k] for k in _SCAN_KEYS if k in e} for e in bd["scanned"]],
-        "done": bd["done"], "responsible": bd["responsible"],
-        "acceptedAt": bd["acceptedAt"],
-    })
+#: Статус приёмки на языке экрана.
+STATUS_LABEL = {
+    "waiting": ("Ожидает", theme.NEUTRAL[800], theme.NEUTRAL[200]),
+    "progress": ("В работе", theme.ACCENT2_RAMP[700], theme.ACCENT2_RAMP[100]),
+    "done": ("Принят", theme.ACCENT_RAMP[700], "transparent"),
+}
 
 
 class ReceivingPage(Page):
@@ -244,70 +162,65 @@ class ReceivingPage(Page):
 
         self._table = TableSection(
             headers=["Заказ", "Статус", "Прогресс", "Вес, кг", "Ответственный", "Создан", "Принят"],
-            widths=[72, 116, 96, 96, 0, 124, 124], rows=self._list_rows(),
+            widths=[72, 116, 96, 96, 0, 124, 124], rows=[],
             on_row_click=self._open, page_size=13, auto_rows=True,
+            on_page_change=self._list_rows,
         )
         self._container.add_block(self._table)
+        self._list_rows()
 
-    def _list_rows(self):
-        q = self._search.strip().lower()
-        wmin = number_value(self._weight_min_input)
-        wmax = number_value(self._weight_max_input)
+    def _list_rows(self, page=1):
+        """Заказы, где мы получатель. Фильтры и страницы считает сервер."""
+        size = self._table.page_size()
+        try:
+            payload = api.client.receipts(
+                status=None if self._status == "all" else self._status,
+                q=self._search.strip() or None,
+                weight_min=number_value(self._weight_min_input),
+                weight_max=number_value(self._weight_max_input),
+                created_from=self._created_from, created_to=self._created_to,
+                shipped_from=self._ship_from, shipped_to=self._ship_to,
+                limit=size, offset=(page - 1) * size,
+            )
+        except ApiError as exc:
+            self._table.set_empty_text(exc.title)
+            self._table.set_rows([], total=0, keep_page=True)
+            return
+
         rows = []
-        for b in _batches():
-            number = b["number"]
-            if q and q not in number.lower():
-                continue
-            weight = _total_weight(b)
-            if wmin is not None and weight < wmin:
-                continue
-            if wmax is not None and weight > wmax:
-                continue
-            if not _within(b["createdDateTime"], self._created_from, self._created_to):
-                continue
-            if not _within(b["shipDateTime"], self._ship_from, self._ship_to):
-                continue
-            bd = _BATCH_DATA.get(b["id"]) or store.batch_progress(b["id"])
-            scanned = len(bd["scanned"]) if bd else 0
-            done = bd["done"] if bd else False
-            if done:
-                label, color, bg, key = "Принят", theme.ACCENT_RAMP[700], "transparent", "done"
-            elif scanned > 0:
-                label, color, bg, key = "В работе", theme.ACCENT2_RAMP[700], theme.ACCENT2_RAMP[100], "progress"
-            else:
-                label, color, bg, key = "Ожидает", theme.NEUTRAL[800], theme.NEUTRAL[200], "waiting"
-            if self._status != "all" and key != self._status:
-                continue
-            total = _total_boxes(b)
-            accepted = (bd["acceptedAt"].split(" ")[0] if (done and bd and bd["acceptedAt"]) else "—")
-            responsible = (bd["responsible"] if bd and bd["responsible"] else "—")
+        for it in payload["items"]:
+            label, color, bg = STATUS_LABEL.get(it["status"], STATUS_LABEL["waiting"])
+            who = it.get("responsible") or {}
             rows.append((
-                [("h", "№" + number), ("tag", label, color, bg), f"{scanned} из {total}",
-                 ("m", f"{_total_weight(b):.1f} кг"), ("m", responsible),
-                 ("m", b["createdDateTime"].split(' ')[0]), ("m", accepted)],
-                b["id"],
+                [("h", "№" + it["number"]), ("tag", label, color, bg),
+                 f'{it["boxes_received"]} из {it["boxes_total"]}',
+                 ("m", f'{it["weight_expected"]:.1f} кг'),
+                 ("m", fmt.short_name(who.get("name", "")) if who else "—"),
+                 ("m", fmt.date(it["created_at"])),
+                 ("m", fmt.date(it.get("accepted_at")))],
+                it["order_id"],
             ))
-        return rows
+        self._table.set_rows(rows, total=payload["total"], keep_page=page > 1)
 
     def _on_search(self, text):
         self._search = text
-        self._table.set_rows(self._list_rows())
+        self._list_rows()
 
     def _on_status(self, _):
         self._status = self._status_input.currentData()
-        self._table.set_rows(self._list_rows())
+        self._list_rows()
 
     def _on_weight(self, _=None):
         self._weight_min = self._weight_min_input.text()
         self._weight_max = self._weight_max_input.text()
-        self._table.set_rows(self._list_rows())
+        self._list_rows()
 
     def _on_dates(self, _=None):
         self._created_from = date_value(self._created_from_input)
         self._created_to = date_value(self._created_to_input)
         self._ship_from = date_value(self._ship_from_input)
         self._ship_to = date_value(self._ship_to_input)
-        self._table.set_rows(self._list_rows())
+        self._list_rows()
 
     def _reset(self):
         self._search = ""; self._status = "all"
@@ -320,10 +233,9 @@ class ReceivingPage(Page):
         for edit in (self._created_from_input, self._created_to_input,
                      self._ship_from_input, self._ship_to_input):
             clear_date(edit)
-        self._table.set_rows(self._list_rows())
+        self._list_rows()
 
     def _open(self, bid):
-        _bdata(bid)
         self._active_id = bid
         self._pending_page = 1
         self._scanned_page = 1
@@ -348,11 +260,18 @@ class ReceivingPage(Page):
 
     # ── detail ──
     def _build_detail(self):
-        b = _batch_by_id(self._active_id)
-        bd = _bdata(self._active_id)
-        scanned = len(bd["scanned"])
-        total = _total_boxes(b)
-        done = bd["done"]
+        try:
+            self._doc = api.client.receipt(self._active_id)
+        except ApiError as exc:
+            self._container.add_block(QLabel(exc.title))
+            return
+        bd = self._doc
+        b = bd["order"]
+        boxes = bd["boxes"]
+        self._pending = [x for x in boxes if not x.get("received_at")]
+        self._scanned = [x for x in boxes if x.get("received_at")]
+        scanned, total = len(self._scanned), len(boxes)
+        done = bd["status"] == "done"
 
         crumb = QLabel(
             f'<a href="#home" style="color:{theme.NEUTRAL[600]};text-decoration:none;">ProЗапас</a> / '
@@ -364,7 +283,7 @@ class ReceivingPage(Page):
         head = QHBoxLayout()
         left = QVBoxLayout(); left.setSpacing(4)
         left.addWidget(h1(f"Заказ №{b['number']}"))
-        sub = QLabel("Приём товаров и материалов от поставщиков")
+        sub = QLabel(f'Приём коробок со склада-отправителя — {b["from_warehouse"]["name"]}')
         sub.setObjectName("muted"); left.addWidget(sub)
         head.addLayout(left); head.addStretch(1)
         complete = button("Завершить приемку", "primary")
@@ -372,12 +291,8 @@ class ReceivingPage(Page):
         head.addWidget(complete, 0, Qt.AlignmentFlag.AlignTop)
         self._container.add_block(head)
 
-        if done:
-            label, color, bg = "Принят", theme.ACCENT_RAMP[700], "transparent"
-        elif scanned > 0:
-            label, color, bg = "В работе", theme.ACCENT2_RAMP[700], theme.ACCENT2_RAMP[100]
-        else:
-            label, color, bg = "Ожидает", theme.NEUTRAL[800], theme.NEUTRAL[200]
+        label, color, bg = STATUS_LABEL.get(bd["status"], STATUS_LABEL["waiting"])
+        who = bd.get("responsible") or {}
         info = BlueprintFrame(padding=theme.SP4)
         # `flex-wrap: wrap` in the mockup: the fields move to the next line
         # instead of being squeezed when the window narrows
@@ -385,13 +300,15 @@ class ReceivingPage(Page):
         stat = QWidget(); sv = QVBoxLayout(stat); sv.setContentsMargins(0, 0, 0, 0); sv.setSpacing(2)
         sk = QLabel("Статус"); sk.setObjectName("kicker"); sv.addWidget(sk); sv.addWidget(Tag(label, color, bg))
         irow.add(stat)
-        irow.add(_kicker_value("Ответственный", bd["responsible"] or "—"))
-        irow.add(_kicker_value("Дата отгрузки", b["shipDateTime"]))
-        irow.add(_kicker_value("Дата принятия", bd["acceptedAt"] or "—"))
-        irow.add(_kicker_value("Дата создания", b["createdDateTime"]))
-        irow.add(_kicker_value("Позиций", len(_batch_positions(b))))
+        irow.add(_kicker_value("Ответственный",
+                               fmt.short_name(who.get("name", "")) if who else "—"))
+        irow.add(_kicker_value("Дата отгрузки", fmt.datetime_(b.get("shipped_at"))))
+        irow.add(_kicker_value("Дата принятия", fmt.datetime_(b.get("accepted_at"))))
+        irow.add(_kicker_value("Дата создания", fmt.datetime_(b["created_at"])))
+        irow.add(_kicker_value("Позиций", len({x["article"] for x in boxes})))
         irow.add(_kicker_value("Коробок", total))
-        irow.add(_kicker_value("Общий вес", f"{_total_weight(b):.1f} кг"))
+        irow.add(_kicker_value("Общий вес",
+                               f'{sum(float(x["weight"]) for x in boxes):.1f} кг'))
         irow.add(_kicker_value("Прогресс", f"{scanned} из {total}"))
         info.content_layout().addWidget(irow)
         self._container.add_block(info)
@@ -407,6 +324,19 @@ class ReceivingPage(Page):
         two.addWidget(self._scanned_panel(bd), 1)
         self._container.add_block(two)
 
+    def _box_label(self, box):
+        """«Коробка 2 из 3» — считается среди коробок того же товара.
+
+        Отдельного поля для этого нет и не нужно: отправитель мог упаковать
+        позицию во сколько угодно коробок, и порядок задаёт сам список.
+        """
+        same = [b for b in self._doc["boxes"] if b["article"] == box["article"]]
+        try:
+            n = same.index(box) + 1
+        except ValueError:
+            n = 1
+        return f"Коробка {n} из {len(same)}"
+
     def _scan_panel(self, bd):
         frame = BlueprintFrame(padding=theme.SP4)
         fl = frame.content_layout()
@@ -415,7 +345,7 @@ class ReceivingPage(Page):
             top = QHBoxLayout()
             box = QVBoxLayout(); box.setSpacing(2)
             kick = QLabel("В работе"); kick.setStyleSheet(f"font-size:11px;color:{theme.ACCENT_RAMP[700]};text-transform:uppercase;")
-            name = QLabel(f'{ab["name"]} · {ab["boxLabel"]} · {ab["expectedWeight"]} кг')
+            name = QLabel(f'{ab["name"]} · {self._box_label(ab)} · {ab["weight"]} кг')
             name.setStyleSheet(f"font-family:{theme.font_heading()};font-size:18px;")
             meta = QLabel("Поставьте коробку на весы и отсканируйте штрихкод ещё раз для подтверждения")
             meta.setWordWrap(True); meta.setStyleSheet(f"font-size:13px;color:{theme.NEUTRAL[600]};")
@@ -467,10 +397,10 @@ class ReceivingPage(Page):
         # артикул не показываем: он уже внутри штрихкода, а панель узкая
         rows = [([("h", p["barcode"], theme.ACCENT_RAMP[700]),
                   p["name"],
-                  f'{p["expectedWeight"]} кг'],
+                  f'{p["weight"]} кг'],
                  p["barcode"],
                  theme.ACCENT_RAMP[100] if p["barcode"] == active else None)
-                for p in bd["pending"]]
+                for p in self._pending]
 
         section = TableSection(
             headers=["Штрихкод", "Наименование", "Вес по заказу"],
@@ -492,19 +422,18 @@ class ReceivingPage(Page):
         fl.addWidget(h4("Отсканировано"))
 
         rows = []
-        for s in bd["scanned"]:
-            if s.get("isMissing"):
-                weight, diff = "—", ("m", "Отсутствует")     # .diff-ok in the mockup
-            else:
-                sign = "+" if float(s["diffKg"]) >= 0 else "-"
-                weight = f'{s["actualWeight"]} кг'
-                diff = ("m", f'{sign}{s["diffPercent"]} %')
-            cells = [("h", s["barcode"], theme.NEUTRAL[600]),
-                     s["name"], weight, diff]
-            # an accepted batch is a closed document — nothing is taken back
-            cells.append("" if bd["done"]
-                         else ("w", lambda bc=s["barcode"]: self._undo_cell(bc)))
-            rows.append((cells, s["barcode"]))
+        for box in self._scanned:
+            # Расхождение считает сервер: хранить разность двух известных чисел
+            # незачем, а расходиться она умеет.
+            diff_pct = box.get("diff_percent")
+            sign = "+" if (diff_pct or 0) >= 0 else "−"
+            cells = [("h", box["barcode"], theme.NEUTRAL[600]),
+                     box["name"], f'{box["actual_weight"]} кг',
+                     ("m", f'{sign}{abs(diff_pct):.1f} %' if diff_pct is not None else "—")]
+            # принятая партия — закрытый документ, из неё ничего не забирают
+            cells.append("" if bd["status"] == "done"
+                         else ("w", lambda bc=box["barcode"]: self._undo_cell(bc)))
+            rows.append((cells, box["barcode"]))
 
         section = TableSection(
             # заголовки укорочены: панель занимает половину ширины, и с полными
@@ -534,19 +463,17 @@ class ReceivingPage(Page):
         return wrap
 
     def _undo_scan(self, barcode):
-        """Take a box back out of «Отсканировано» — it returns to the queue."""
-        bd = _bdata(self._active_id)
-        if bd["done"]:
+        """Убрать коробку из принятых — она возвращается в очередь."""
+        if self._doc["status"] == "done":
             return
-        bd["scanned"] = [e for e in bd["scanned"] if e["barcode"] != barcode]
-        # rebuild the queue from the batch so the boxes keep their original order
-        done_codes = {e["barcode"] for e in bd["scanned"]}
-        batch = _batch_by_id(self._active_id)
-        bd["pending"] = [b for b in _batch_boxes(batch) if b["barcode"] not in done_codes]
+        try:
+            api.client.undo_receive(self._active_id, barcode)
+        except ApiError as exc:
+            self.show_error(exc)
+            return
         if self._active_box and self._active_box["barcode"] == barcode:
             self._active_box = None
         self._scan_error = ""
-        _save_bdata(self._active_id)
         self._render()
 
     # ── scanning ──
@@ -559,14 +486,12 @@ class ReceivingPage(Page):
         code = (barcode or "").strip().upper()
         if not code:
             return
-        bd = _bdata(self._active_id)
         if not self._active_box:
-            item = next((p for p in bd["pending"] if p["barcode"] == code), None)
+            item = next((p for p in self._pending if p["barcode"] == code), None)
             if not item:
                 self._scan_error = "Штрихкод не найден в этой партии."
                 self._render()
                 return
-            bd["responsible"] = bd["responsible"] or store.current_user_name()
             self._active_box = item
             self._scan_error = ""
             self._render()
@@ -575,8 +500,9 @@ class ReceivingPage(Page):
             self._scan_error = "Это другая коробка. Поставьте на весы ту же коробку и отсканируйте ещё раз."
             self._render()
             return
+
         item = self._active_box
-        expected = float(item["expectedWeight"])
+        expected = float(item["weight"])
         # Второй скан той же коробки фиксирует вес: коробка уже на весах, и
         # записывается ровно то число, которое кладовщик видит на панели.
         if devices.available("scale") and self._live is not None:
@@ -586,13 +512,14 @@ class ReceivingPage(Page):
             actual = weight_dialog(self, hint=f"по заказу {expected:.1f} кг")
             if actual is None:
                 return
-        diff_kg = actual - expected
-        diff_percent = abs(diff_kg / expected * 100) if expected else 0.0
-        bd["pending"] = [p for p in bd["pending"] if p["barcode"] != item["barcode"]]
-        bd["scanned"].append(dict(item, actualWeight=f"{actual:.1f}",
-                                  diffKg=f"{diff_kg:.1f}", diffPercent=f"{diff_percent:.1f}"))
+        try:
+            # Идемпотентно: коробку уже приняли — сервер вернёт её как есть.
+            # Расхождение считает он же, клиент шлёт только факт.
+            api.client.receive_box(self._active_id, item["barcode"], actual)
+        except ApiError as exc:
+            self.show_error(exc)
+            return
         self._last_weight = f"{actual:.1f}"
-        _save_bdata(self._active_id)
         self._active_box = None
         self._scan_error = ""
         self._render()
@@ -604,36 +531,29 @@ class ReceivingPage(Page):
 
     # ── complete ──
     def _request_complete(self, b):
-        bd = _bdata(self._active_id)
-        if bd["pending"]:
-            lines = "\n".join(f'· {p["barcode"]} — {p["name"]}' for p in bd["pending"])
-            if confirm_dialog(self, "Не все коробки отсканированы",
-                              f"Осталось не отсканировано: {len(bd['pending'])}. "
-                              f"Эти позиции будут отмечены как отсутствующие.\n\n{lines}",
-                              confirm_label="Завершить с недостачей"):
-                self._complete(b)
-        else:
-            self._complete(b)
+        if self._pending:
+            lines = "\n".join(f'· {p["barcode"]} — {p["name"]}' for p in self._pending)
+            if not confirm_dialog(
+                    self, "Не все коробки отсканированы",
+                    f"Осталось не отсканировано: {len(self._pending)}. "
+                    f"Эти коробки будут отмечены как недостача.\n\n{lines}",
+                    confirm_label="Завершить с недостачей"):
+                return
+        self._complete(b)
 
     def _complete(self, b):
-        bd = _bdata(self._active_id)
-        accepted = store.format_now()
-        bd["done"] = True
-        bd["acceptedAt"] = accepted
-        bd["responsible"] = bd["responsible"] or store.current_user_name()
-        for p in bd["pending"]:
-            bd["scanned"].append(dict(p, isMissing=True))
-        bd["pending"] = []
-        _save_bdata(self._active_id)
-        # if this batch is one of our orders, mark it received
-        if isinstance(self._active_id, str) and self._active_id.startswith("ord-"):
-            oid = int(self._active_id.split("-")[1])
-            orders = store.load_orders()
-            for o in orders:
-                if o["id"] == oid:
-                    o["status"] = "received"
-                    o["acceptedAt"] = accepted
-                    o["history"] = o.get("history", []) + [{"status": "received", "dateTime": accepted}]
-                    break
-            store.save_orders(orders)
+        """Завершение — одна транзакция на сервере: оприходование и статусы.
+
+        Коробки без отметки о приёмке становятся зафиксированной недостачей;
+        заказ всё равно переходит в «Принят».
+        """
+        try:
+            api.client.complete_receipt(self._active_id, self._doc["version"])
+        except Conflict:
+            self.show_error(type("_", (), {"title":
+                "Приёмку уже изменили в другом месте. Открываю текущее состояние."})())
+        except ApiError as exc:
+            self.show_error(exc)
+            return
+        self._active_box = None
         self._render()

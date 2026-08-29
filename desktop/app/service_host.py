@@ -12,14 +12,13 @@
 """
 from __future__ import annotations
 
-import os
 import sys
 import time
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QProcess
 
-from . import devices
+from . import config, devices
 
 #: Путь к службе можно задать снаружи — например, когда её ставят отдельно.
 SERVICE_DIR_ENV = "PROZAPAS_DEVICES_SERVICE"
@@ -28,7 +27,7 @@ _READY_TIMEOUT_MS = 6000    # столько ждём, пока служба о�
 _STOP_TIMEOUT_MS = 3000     # столько ждём добровольного завершения
 _POLL_MS = 100
 #: Столько служба живёт без клиентов — страховка от осиротевшего процесса.
-_IDLE_TIMEOUT_SEC = 30
+_IDLE_TIMEOUT_SEC = config.number("PROZAPAS_IDLE_TIMEOUT")
 
 OWN = "own"                 # службу подняли мы — нам её и гасить
 EXTERNAL = "external"       # служба была до нас
@@ -37,7 +36,7 @@ ABSENT = "absent"           # запустить не удалось: работ
 
 def service_dir() -> Path | None:
     """Каталог со службой или None, если он не найден."""
-    override = os.environ.get(SERVICE_DIR_ENV, "").strip()
+    override = config.get(SERVICE_DIR_ENV).strip()
     candidates = [Path(override)] if override else []
     candidates.append(Path(__file__).resolve().parents[1])   # каталог desktop
     for path in candidates:
